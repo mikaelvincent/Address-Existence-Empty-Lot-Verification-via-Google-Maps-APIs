@@ -12,6 +12,12 @@
 Compliance notes:
 - Uses Microsoft Global ML Building Footprints dataset as referenced in the spec.
 - Only centroid points are stored locally; no Google content is cached here.
+
+Numerics:
+- Centroid computation uses a **translated local origin** to avoid catastrophic
+  cancellation when polygons are very small (tens of meters) but coordinates are
+  large in magnitude (e.g., lon ≈ -122, lat ≈ 37). This stabilizes the shoelace
+  centroid formula for building footprints.
 """
 
 from __future__ import annotations
@@ -70,32 +76,44 @@ def haversine_m(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
 # ------------------------------
 
 
-def _polygon_centroid_xy(
+def _ring_area_and_centroid_xy(
     ring: Sequence[Sequence[float]],
-) -> Optional[Tuple[float, float]]:
-    """Return (x, y) centroid of an outer ring using the planar shoelace formula over lon/lat."""
+) -> Tuple[float, Tuple[float, float]]:
+    """Return (signed area in degrees^2, centroid (x,y)=lon,lat) for an outer ring.
+
+    Uses a numerically-stable variant of the shoelace centroid:
+    - Translate coordinates to a local origin to reduce cancellation.
+    - If the polygon is degenerate (|A|≈0), fall back to the bbox center.
+    """
     if not ring or len(ring) < 3:
-        return None
-    # Ensure closed ring
+        return 0.0, (float("nan"), float("nan"))
+
     pts = list(ring)
     if pts[0] != pts[-1]:
         pts.append(pts[0])
+
+    x_ref, y_ref = pts[0]
     A = 0.0
     Cx = 0.0
     Cy = 0.0
     for i in range(len(pts) - 1):
-        x0, y0 = pts[i][0], pts[i][1]
-        x1, y1 = pts[i + 1][0], pts[i + 1][1]
+        x0, y0 = pts[i][0] - x_ref, pts[i][1] - y_ref
+        x1, y1 = pts[i + 1][0] - x_ref, pts[i + 1][1] - y_ref
         cross = x0 * y1 - x1 * y0
         A += cross
         Cx += (x0 + x1) * cross
         Cy += (y0 + y1) * cross
-    if abs(A) < 1e-12:
-        return None
+
     A *= 0.5
-    Cx /= 6.0 * A
-    Cy /= 6.0 * A
-    return (Cx, Cy)
+    if abs(A) < 1e-24:
+        # Degenerate; use bbox center (original coordinates)
+        xs = [p[0] for p in pts[:-1]]
+        ys = [p[1] for p in pts[:-1]]
+        return 0.0, ((min(xs) + max(xs)) / 2.0, (min(ys) + max(ys)) / 2.0)
+
+    cx = Cx / (6.0 * A) + x_ref
+    cy = Cy / (6.0 * A) + y_ref
+    return A, (cx, cy)
 
 
 def _feature_centroid_latlng(feature: Dict) -> Optional[Tuple[float, float]]:
@@ -109,42 +127,28 @@ def _feature_centroid_latlng(feature: Dict) -> Optional[Tuple[float, float]]:
     if not coords or gtype not in {"POLYGON", "MULTIPOLYGON"}:
         return None
 
-    def centroid_from_coords(c: Sequence) -> Optional[Tuple[float, float]]:
-        # c is list of linear rings (outer first). Use the outer ring (index 0).
-        if not c or not c[0]:
+    if gtype == "POLYGON":
+        area, (x, y) = _ring_area_and_centroid_xy(coords[0])
+        if math.isnan(x) or math.isnan(y):
             return None
-        xy = _polygon_centroid_xy(c[0])
-        if xy is None:
-            return None
-        x, y = xy  # x = lon, y = lat
         return (y, x)
 
-    if gtype == "POLYGON":
-        return centroid_from_coords(coords)
-    else:  # MULTIPOLYGON
-        # Use the polygon with the largest absolute area (outer ring)
-        best: Optional[Tuple[float, float]] = None
-        best_area = 0.0
-        for poly in coords:
-            if not poly or not poly[0]:
-                continue
-            ring = poly[0]
-            # Compute area magnitude for selection
-            if ring[0] != ring[-1]:
-                ring = list(ring) + [ring[0]]
-            A = 0.0
-            for i in range(len(ring) - 1):
-                x0, y0 = ring[i][0], ring[i][1]
-                x1, y1 = ring[i + 1][0], ring[i + 1][1]
-                A += x0 * y1 - x1 * y0
-            area_mag = abs(A) * 0.5
-            c = _polygon_centroid_xy(poly[0])
-            if c is None:
-                continue
-            if area_mag > best_area:
-                best_area = area_mag
-                best = (c[1], c[0])  # lat,lng
-        return best
+    # MULTIPOLYGON: pick the polygon with the largest absolute outer-ring area
+    best_xy: Optional[Tuple[float, float]] = None
+    best_area = -1.0
+    for poly in coords:
+        if not poly or not poly[0]:
+            continue
+        area, (x, y) = _ring_area_and_centroid_xy(poly[0])
+        a = abs(area)
+        if math.isnan(x) or math.isnan(y):
+            continue
+        if a > best_area:
+            best_area = a
+            best_xy = (x, y)
+    if best_xy is None:
+        return None
+    return (best_xy[1], best_xy[0])  # lat,lng
 
 
 def load_centroids_from_file(path: str) -> List[Tuple[float, float]]:
@@ -160,7 +164,6 @@ def load_centroids_from_file(path: str) -> List[Tuple[float, float]]:
     if lower.endswith(".csv"):
         with open(path, "r", encoding="utf-8", newline="") as f:
             reader = csv.DictReader(f)
-            # normalize headers
             headers = {h.lower(): h for h in (reader.fieldnames or [])}
             lat_key = headers.get("lat")
             lng_key = (
@@ -280,7 +283,6 @@ def _collect_footprint_files(patterns: Sequence[str]) -> List[str]:
         if expanded:
             files.extend(expanded)
         else:
-            # If no glob expansion, keep the literal path if it exists
             if os.path.exists(pat):
                 files.append(pat)
     if not files:
@@ -385,11 +387,7 @@ def run_footprints(
 
     # Ensure output directory exists
     out_dir = os.path.dirname(output_csv_path) or "."
-    (
-        Path(out_dir).mkdirs(parents=True, exist_ok=True)
-        if hasattr(Path(out_dir), "mkdirs")
-        else Path(out_dir).mkdir(parents=True, exist_ok=True)
-    )
+    Path(out_dir).mkdir(parents=True, exist_ok=True)
 
     # Deterministic write
     with open(output_csv_path, "w", encoding="utf-8", newline="") as f_out:
