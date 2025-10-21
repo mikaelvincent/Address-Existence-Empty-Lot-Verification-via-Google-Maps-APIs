@@ -1,3 +1,4 @@
+# src/reporting.py
 """Consolidation, QA, and final packaging.
 
 Functions:
@@ -12,7 +13,7 @@ Inputs:
 
 Outputs:
 - data/final_enhanced.csv (same schema as enhanced.csv; labels overridden where applicable)
-- docs/run_report.md (summary metrics, counts, distributions, notes)
+- docs/run_report.md (summary metrics, counts, distributions, notes, run key if available)
 - docs/run_report.pdf (if fpdf2 is installed)
 - data/logs/final_decisions.jsonl (per-row final decision snapshot)
 
@@ -23,6 +24,10 @@ Compliance:
 Determinism:
 - If environment var RUN_ANCHOR_TIMESTAMP_UTC is set to an ISO‑8601 timestamp,
   it is used in the report header; otherwise current UTC time is used.
+
+Idempotency:
+- If present, we read a run key from `data/logs/decision_summary.json` (written by the
+  decision step) and include it in the report header to correlate artifacts across runs.
 """
 
 from __future__ import annotations
@@ -76,6 +81,17 @@ def _anchor_timestamp() -> str:
         except Exception:
             pass
     return dt.datetime.now(dt.timezone.utc).isoformat()
+
+
+def _maybe_read_run_key(default_summary_path: str = "data/logs/decision_summary.json") -> str:
+    """Return run key if present in the decision summary JSON; else empty string."""
+    try:
+        with open(default_summary_path, "r", encoding="utf-8") as f:
+            obj = json.load(f)
+        rk = str(obj.get("run_key") or "").strip()
+        return rk
+    except Exception:
+        return ""
 
 
 # ------------------------------
@@ -334,11 +350,12 @@ def _format_kv_table(d: Dict[str, int], key_hdr: str, val_hdr: str) -> str:
     return "\n".join(lines) + "\n"
 
 
-def _build_report_md(metrics: RunMetrics, run_ts: str, cfg: config_loader.Config) -> str:
+def _build_report_md(metrics: RunMetrics, run_ts: str, cfg: config_loader.Config, run_key: str) -> str:
     unresolved_flags = {"LIKELY_EMPTY_LOT", "NEEDS_HUMAN_REVIEW"}
+    rk_line = f"\n**Run key:** `{run_key}`\n" if run_key else ""
     return f"""# Run Report — Address Existence & Empty‑Lot Verification
 
-**Run timestamp (UTC):** {run_ts}
+**Run timestamp (UTC):** {run_ts}{rk_line}
 
 ## Summary
 - **Total rows:** {metrics.total_rows}
@@ -452,7 +469,8 @@ def run_reporting(
     # Metrics & report
     metrics = _aggregate_metrics(updated_rows, overrides)
     run_ts = _anchor_timestamp()
-    report_md = _build_report_md(metrics, run_ts, cfg)
+    run_key = _maybe_read_run_key()  # best-effort; may be empty
+    report_md = _build_report_md(metrics, run_ts, cfg, run_key)
     _ensure_dir(report_md_out)
     with open(report_md_out, "w", encoding="utf-8") as f:
         f.write(report_md)
