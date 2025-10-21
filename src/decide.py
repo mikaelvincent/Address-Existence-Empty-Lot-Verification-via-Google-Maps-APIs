@@ -3,9 +3,9 @@
 Inputs (CSV; join key: input_id):
   - data/normalized.csv      (non_physical_flag)
   - data/geocode.csv         (input_address_raw, geocode_status, lat, lng, location_type, api_error_codes)
-  - data/streetview_meta.csv (sv_metadata_status, sv_image_date, sv_stale_flag)
+  - data/streetview_meta.csv (sv_metadata_status, sv_image_date, sv_stale_flag, api_error_codes)
   - data/footprints.csv      (footprint_within_m, footprint_present_flag)
-  - data/validation.csv      (std_address, validation_ran_flag, validation_verdict)
+  - data/validation.csv      (std_address, validation_ran_flag, validation_verdict, api_error_codes)
 
 Outputs:
   - data/enhanced.csv (schema documented in docs/spec; see repository docs)
@@ -14,6 +14,9 @@ Outputs:
 Rules:
   - Apply explicit rule order and reason codes as documented in the spec.
   - Edge case: P.O. Boxes (non‑physical) are ALWAYS labeled NON_PHYSICAL_ADDRESS.
+  - Per spec §12: any persistent API failure in upstream modules (after retries) must:
+      * populate `api_error_codes`, and
+      * short-circuit to NEEDS_HUMAN_REVIEW with reason `API_FAILURE`.
 
 Compliance:
   - Generates only Google Maps **URLs** for human review (no scraping, no API here).
@@ -34,7 +37,7 @@ import json
 import os
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional
 
 import config_loader  # type: ignore
 import urls  # type: ignore
@@ -129,6 +132,26 @@ class EnhancedRow:
     api_error_codes: str
 
 
+def _merge_api_error_codes(*lists: List[str]) -> List[str]:
+    out: List[str] = []
+    seen = set()
+    for lst in lists:
+        for code in lst:
+            c = (code or "").strip()
+            if not c or c in seen:
+                continue
+            seen.add(c)
+            out.append(c)
+    return out
+
+
+def _split_codes(s: str) -> List[str]:
+    s = (s or "").strip()
+    if not s:
+        return []
+    return [tok for tok in s.split("|") if tok.strip()]
+
+
 def _decide_one(
     geo: Dict[str, str],
     norm: Dict[str, str],
@@ -143,20 +166,26 @@ def _decide_one(
     lat_s = (geo.get("lat") or "").strip()
     lng_s = (geo.get("lng") or "").strip()
     location_type = (geo.get("location_type") or "").strip()
-    api_error_codes = (geo.get("api_error_codes") or "").strip()
+    geo_api_errs = _split_codes(geo.get("api_error_codes", ""))
 
     std_address = val.get("std_address", "")
     validation_ran_flag = _to_bool(val.get("validation_ran_flag", "false"))
     validation_verdict = (val.get("validation_verdict") or "NOT_RUN").strip()
+    val_api_errs = _split_codes(val.get("api_error_codes", ""))
 
     sv_metadata_status = (sv.get("sv_metadata_status") or "").strip()
     sv_image_date = (sv.get("sv_image_date") or "").strip()
     sv_stale_flag_b = _to_bool(sv.get("sv_stale_flag", "false"))
+    sv_api_errs = _split_codes(sv.get("api_error_codes", ""))
 
     footprint_within_m = (fp.get("footprint_within_m") or "").strip() or "-1"
     footprint_present_flag_b = _to_bool(fp.get("footprint_present_flag", "false"))
 
     non_physical_flag_b = _to_bool(norm.get("non_physical_flag", "false"))
+
+    # Merge API error codes across modules (per spec §12)
+    merged_api_errs = _merge_api_error_codes(geo_api_errs, sv_api_errs, val_api_errs)
+    has_persistent_api_error = len(merged_api_errs) > 0
 
     # Prepare reason codes as a set (we'll render ordered later)
     reasons: set[str] = set()
@@ -182,9 +211,6 @@ def _decide_one(
         reasons.add("SV_ZERO_RESULTS")
     if sv_stale_flag_b:
         reasons.add("SV_STALE")
-
-    # Persistent API errors from geocoding (after retries)
-    has_persistent_api_error = bool(api_error_codes) and geocode_status not in {"OK", "ZERO_RESULTS"}
     if has_persistent_api_error:
         reasons.add("API_FAILURE")
 
@@ -200,7 +226,7 @@ def _decide_one(
     if non_physical_flag_b:
         final_flag = "NON_PHYSICAL_ADDRESS"
     else:
-        # Short-circuit for persistent API errors (spec §12)
+        # Short-circuit for any persistent API errors across modules (spec §12)
         if has_persistent_api_error:
             final_flag = "NEEDS_HUMAN_REVIEW"
         else:
@@ -212,7 +238,6 @@ def _decide_one(
             else:
                 # 3) Auto-valid
                 #   ROOFTOP AND (footprint_present OR (sv_status OK and NOT stale))
-                # Note: This is consistent with §7.6 example that stale SV + no footprint → review.
                 if location_type == "ROOFTOP" and (
                     footprint_present_flag_b
                     or (sv_metadata_status == "OK" and not sv_stale_flag_b)
@@ -223,7 +248,7 @@ def _decide_one(
                     location_type != "ROOFTOP"
                     and not footprint_present_flag_b
                     and (sv_metadata_status in {"OK", "ZERO_RESULTS"})
-                    and not sv_stale_flag_b  # be conservative when stale
+                    and not sv_stale_flag_b  # conservative when stale
                 ):
                     final_flag = "LIKELY_EMPTY_LOT"
                 else:
@@ -263,7 +288,7 @@ def _decide_one(
         reason_codes=reason_codes,
         notes=notes,
         run_timestamp_utc=_anchor_timestamp(),
-        api_error_codes=api_error_codes,
+        api_error_codes="|".join(merged_api_errs),
     )
 
 
