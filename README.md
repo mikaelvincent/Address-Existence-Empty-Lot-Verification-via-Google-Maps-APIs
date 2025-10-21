@@ -32,7 +32,7 @@ python3 -m pip install -r requirements.txt
 
 ### 3) Run (current pipeline)
 
-**Normalize → Geocode → Street View metadata → Footprints proximity → Conditional Address Validation → Decision & URLs → Human‑review kit**
+**Normalize → Geocode → Street View metadata → Footprints proximity → Conditional Address Validation → Decision & URLs → Human‑review kit → Final consolidation & report**
 
 ```bash
 # Normalize input CSV to data/normalized.csv
@@ -93,6 +93,18 @@ python src/review_pack.py \
   --rubric-out-md docs/reviewer_rubric.md \
   --rubric-out-pdf docs/reviewer_rubric.pdf \
   --config config/config.yml
+
+# Final consolidation & run report (Sprint 8)
+# - Merges optional data/review_log_completed.csv
+# - Writes data/final_enhanced.csv, docs/run_report.md/.pdf, data/logs/final_decisions.jsonl
+python src/reporting.py \
+  --enhanced data/enhanced.csv \
+  --reviews data/review_log_completed.csv \
+  --final-out data/final_enhanced.csv \
+  --report-md docs/run_report.md \
+  --report-pdf docs/run_report.pdf \
+  --log-jsonl data/logs/final_decisions.jsonl \
+  --config config/config.yml
 ```
 
 Or via `make`:
@@ -105,24 +117,13 @@ make footprints IN=data/geocode.csv FP="data/footprints/*.geojson" OUT=data/foot
 make validate  GEOCODE=data/geocode.csv SVMETA=data/streetview_meta.csv FP=data/footprints.csv NORM=data/normalized.csv OUT=data/validation.csv LOG=data/logs/address_validation_api_log.jsonl
 make decide    GEOCODE=data/geocode.csv SVMETA=data/streetview_meta.csv FP=data/footprints.csv VALID=data/validation.csv NORM=data/normalized.csv OUT=data/enhanced.csv QA=data/logs/decision_summary.json
 make review    IN=data/enhanced.csv QOUT=data/review_queue.csv LTOUT=data/review_log_template.csv RMD=docs/reviewer_rubric.md RPDF=docs/reviewer_rubric.pdf
+make report    ENH=data/enhanced.csv REV=data/review_log_completed.csv FINAL=data/final_enhanced.csv MD=docs/run_report.md PDF=docs/run_report.pdf JLOG=data/logs/final_decisions.jsonl
 ```
 
-**Determinism tip:** Upstream modules write no timestamps to CSV. `enhanced.csv` includes a `run_timestamp_utc`. For reproducible tests, set:
+**Determinism tip:** Upstream modules write no timestamps to intermediate CSVs; `enhanced.csv` includes a run timestamp. For reproducible reports, set:
 
 ```bash
 export RUN_ANCHOR_TIMESTAMP_UTC="2025-01-01T00:00:00+00:00"
 ```
 
-**PDF note:** The rubric PDF is generated if `fpdf2` is installed. Otherwise, the Markdown rubric is always created.
-
----
-
-## Compliance (essentials)
-
-* ✅ Use **official** Google Maps Platform APIs only.
-* ✅ For automation, query **Street View metadata** only; **no** bulk image downloads.
-* ✅ Provide **Google Maps URLs** for human review (no API key required to open).
-* ✅ Cache **only** lat/lng (≤ 30 days) and cacheable **Google IDs**.
-* ❌ Do **not** scrape google.com/maps or export content beyond licensed API fields.
-
-> The decision engine generates Maps URLs only (no scraping) and follows §7.6 of the spec for labels and reason codes. P.O. Boxes are always labeled `NON_PHYSICAL_ADDRESS` (spec §12).
+**PDF note:** The run report PDF is generated if `fpdf2` is installed (already listed in `requirements.txt`). Otherwise, the Markdown report is always written.
