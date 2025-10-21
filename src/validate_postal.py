@@ -17,7 +17,7 @@ API: Google Address Validation — v1:validateAddress
 
 Output:
     * data/validation.csv with columns:
-        input_id, std_address, validation_ran_flag, validation_verdict
+        input_id, std_address, validation_ran_flag, validation_verdict, api_error_codes
       (one row per input_id; NOT_RUN when validation was skipped)
 
 Compliance:
@@ -66,6 +66,7 @@ class ValidationResult:
     std_address: str
     validation_ran_flag: bool
     validation_verdict: str  # VALID | UNCONFIRMED | INVALID | NOT_RUN
+    api_error_codes: List[str]
 
 
 # ------------------------------
@@ -190,11 +191,16 @@ def validate_one(
     retry: config_loader.RetryPolicy,
     logger: JsonlLogger,
     http_post=_http_post,
-) -> Tuple[str, str]:
-    """Call Address Validation API; return (std_address, simplified_verdict)."""
-    last_status = "UNKNOWN_ERROR"
+) -> Tuple[str, str, List[str]]:
+    """Call Address Validation API; return (std_address, simplified_verdict, api_error_codes).
+
+    Error classification policy (spec §12):
+    - Any transport/server/exception failures must NOT become 'INVALID'.
+    - Such failures return simplified_verdict='UNCONFIRMED' and are surfaced via api_error_codes.
+    """
     std_address = ""
     simplified = "UNCONFIRMED"
+    api_errs: List[str] = []
 
     params = {"key": api_key or ""}
     body = {
@@ -202,6 +208,8 @@ def validate_one(
             "addressLines": [address_raw],
         },
     }
+
+    last_status = "UNKNOWN_ERROR"
 
     for attempt in range(1, retry.max_attempts + 1):
         started = dt.datetime.now(dt.timezone.utc).isoformat()
@@ -214,7 +222,7 @@ def validate_one(
             except Exception:
                 payload = {}
 
-            # Error-style responses use top-level "error"
+            # Success path
             if http_status == 200 and "result" in payload:
                 result = payload.get("result", {})
                 verdict = result.get("verdict", {}) or {}
@@ -232,13 +240,17 @@ def validate_one(
                         "simplified_verdict": simplified,
                     }
                 )
-                return std_address, simplified
+                return std_address, simplified, api_errs
 
-            # Non-OK; decide retry
-            err = (payload.get("error", {}) or {}).get(
-                "status"
-            ) or f"HTTP_{http_status}"
-            last_status = str(err)
+            # Error responses may include top-level "error" with "status"
+            err_status = (payload.get("error", {}) or {}).get("status")
+            if err_status:
+                last_status = str(err_status)
+                api_errs.append(f"ADDRVAL_{last_status}")
+            else:
+                last_status = f"HTTP_{http_status}"
+                if http_status != 200:
+                    api_errs.append(f"ADDRVAL_HTTP_{http_status}")
 
             logger.write(
                 {
@@ -252,6 +264,7 @@ def validate_one(
 
         except Exception as e:
             last_status = f"EXC_{e.__class__.__name__}"
+            api_errs.append(f"ADDRVAL_EXC_{e.__class__.__name__}")
             logger.write(
                 {
                     "ts": started,
@@ -267,10 +280,8 @@ def validate_one(
             base = retry.base_seconds * (2 ** (attempt - 1))
             time.sleep(base)
 
-    # Exhausted retries
-    return std_address, (
-        "UNCONFIRMED" if last_status.startswith("HTTP_") else "INVALID"
-    )
+    # Exhausted retries — per spec, treat as UNCONFIRMED; errors surfaced via api_error_codes
+    return std_address, "UNCONFIRMED", api_errs
 
 
 # ------------------------------
@@ -356,13 +367,14 @@ def run_validation(
                 std_address="",
                 validation_ran_flag=False,
                 validation_verdict="NOT_RUN",
+                api_error_codes=[],
             )
 
     # Execute validations concurrently
     def worker(ix: int, row: Dict[str, str]) -> Tuple[int, ValidationResult]:
         iid = row.get("input_id", "")
         address_raw = row.get("input_address_raw", "")
-        std_addr, simplified = validate_one(
+        std_addr, simplified, errs = validate_one(
             input_id=iid,
             address_raw=address_raw,
             api_key=api_key,
@@ -375,6 +387,7 @@ def run_validation(
             std_address=std_addr,
             validation_ran_flag=True,
             validation_verdict=simplified,
+            api_error_codes=errs,
         )
 
     with ThreadPoolExecutor(max_workers=cfg.concurrency.workers) as pool:
@@ -395,6 +408,7 @@ def run_validation(
                 "std_address",
                 "validation_ran_flag",
                 "validation_verdict",
+                "api_error_codes",
             ],
         )
         writer.writeheader()
@@ -406,6 +420,7 @@ def run_validation(
                     std_address="",
                     validation_ran_flag=False,
                     validation_verdict="NOT_RUN",
+                    api_error_codes=[],
                 ),
             )
             writer.writerow(
@@ -414,6 +429,7 @@ def run_validation(
                     "std_address": r.std_address,
                     "validation_ran_flag": _format_bool(r.validation_ran_flag),
                     "validation_verdict": r.validation_verdict,
+                    "api_error_codes": "|".join(r.api_error_codes),
                 }
             )
 
