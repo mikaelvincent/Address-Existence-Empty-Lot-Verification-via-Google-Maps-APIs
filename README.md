@@ -32,7 +32,7 @@ python3 -m pip install -r requirements.txt
 
 ### 3) Run (current pipeline)
 
-**Normalize → Geocode → Street View metadata → Footprints proximity → Conditional Address Validation → Decision & URLs**
+**Normalize → Geocode → Street View metadata → Footprints proximity → Conditional Address Validation → Decision & URLs → Human‑review kit**
 
 ```bash
 # Normalize input CSV to data/normalized.csv
@@ -83,6 +83,16 @@ python src/decide.py \
   --output data/enhanced.csv \
   --config config/config.yml \
   --summary data/logs/decision_summary.json
+
+# Human‑review kit (Sprint 7)
+# Produces: data/review_queue.csv, data/review_log_template.csv, docs/reviewer_rubric.md, docs/reviewer_rubric.pdf*
+python src/review_pack.py \
+  --enhanced data/enhanced.csv \
+  --queue-out data/review_queue.csv \
+  --log-template-out data/review_log_template.csv \
+  --rubric-out-md docs/reviewer_rubric.md \
+  --rubric-out-pdf docs/reviewer_rubric.pdf \
+  --config config/config.yml
 ```
 
 Or via `make`:
@@ -94,6 +104,7 @@ make svmeta    IN=data/geocode.csv    OUT=data/streetview_meta.csv LOG=data/logs
 make footprints IN=data/geocode.csv FP="data/footprints/*.geojson" OUT=data/footprints.csv LOG=data/logs/footprints_log.jsonl
 make validate  GEOCODE=data/geocode.csv SVMETA=data/streetview_meta.csv FP=data/footprints.csv NORM=data/normalized.csv OUT=data/validation.csv LOG=data/logs/address_validation_api_log.jsonl
 make decide    GEOCODE=data/geocode.csv SVMETA=data/streetview_meta.csv FP=data/footprints.csv VALID=data/validation.csv NORM=data/normalized.csv OUT=data/enhanced.csv QA=data/logs/decision_summary.json
+make review    IN=data/enhanced.csv QOUT=data/review_queue.csv LTOUT=data/review_log_template.csv RMD=docs/reviewer_rubric.md RPDF=docs/reviewer_rubric.pdf
 ```
 
 **Determinism tip:** Upstream modules write no timestamps to CSV. `enhanced.csv` includes a `run_timestamp_utc`. For reproducible tests, set:
@@ -101,6 +112,8 @@ make decide    GEOCODE=data/geocode.csv SVMETA=data/streetview_meta.csv FP=data/
 ```bash
 export RUN_ANCHOR_TIMESTAMP_UTC="2025-01-01T00:00:00+00:00"
 ```
+
+**PDF note:** The rubric PDF is generated if `fpdf2` is installed. Otherwise, the Markdown rubric is always created.
 
 ---
 
