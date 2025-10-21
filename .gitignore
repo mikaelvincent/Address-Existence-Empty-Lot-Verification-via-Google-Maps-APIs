@@ -205,3 +205,11 @@ cython_debug/
 marimo/_static/
 marimo/_lsp/
 __marimo__/
+
+# Mapper
+.mapignore
+.mapheader
+.map
+.mapfooter
+
+comments.txt
