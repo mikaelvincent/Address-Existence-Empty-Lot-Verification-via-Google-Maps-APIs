@@ -171,6 +171,36 @@ Be conservative when imagery is old or conflicting. When in doubt, choose `UNSUR
 """
 
 
+def _latin1_sanitize(text: str) -> str:
+    """Replace common Unicode punctuation with Latin-1/ASCII-safe equivalents.
+
+    This prevents FPDF from raising FPDFUnicodeEncodingException when using core fonts.
+    """
+    replacements = {
+        "\u2014": " - ",  # em dash —
+        "\u2013": "-",    # en dash –
+        "\u2015": "-",    # horizontal bar ―
+        "\u2212": "-",    # minus sign −
+        "\u2011": "-",    # non-breaking hyphen ‑
+        "\u2012": "-",    # figure dash ‒
+        "\u2022": "*",    # bullet •
+        "\u2018": "'",    # left single ‘
+        "\u2019": "'",    # right single ’
+        "\u201C": '"',    # left double “
+        "\u201D": '"',    # right double ”
+        "\u2026": "...",  # ellipsis …
+        "\u200B": "",     # zero-width space
+        "\u2060": "",     # word joiner
+        "\u00A0": " ",    # non-breaking space (Latin-1 but normalize to plain space)
+    }
+    out = text
+    for k, v in replacements.items():
+        out = out.replace(k, v)
+    # Drop/replace any residual chars outside Latin-1 range just in case.
+    out = "".join(ch if ord(ch) <= 255 else "?" for ch in out)
+    return out
+
+
 def _write_text_pdf(text: str, out_path: str) -> Tuple[bool, str]:
     """Write a simple text PDF using fpdf2 if available.
 
@@ -185,15 +215,22 @@ def _write_text_pdf(text: str, out_path: str) -> Tuple[bool, str]:
     pdf = FPDF()
     pdf.set_auto_page_break(auto=True, margin=15)
     pdf.add_page()
-    pdf.set_font("Arial", size=12)
+    # Use core font with Latin-1 encoding; avoid deprecated Arial alias.
+    pdf.set_font("helvetica", size=12)
+
     # Split markdown to lines and render as plain text blocks.
     for line in text.splitlines():
-        # Treat headings as bold-ish by prefixing with '• ' for readability
+        # Render headings as plain lines (strip leading #)
         if line.startswith("#"):
             line = line.lstrip("#").strip()
-            if line:
-                line = f"{line}"
-        pdf.multi_cell(0, 6, txt=line)
+        sanitized = _latin1_sanitize(line)
+        try:
+            pdf.multi_cell(0, 6, text=sanitized)
+        except Exception:
+            # Last-resort fallback: force-encode to latin-1 ignoring errors
+            sanitized_fallback = sanitized.encode("latin-1", "ignore").decode("latin-1")
+            pdf.multi_cell(0, 6, text=sanitized_fallback)
+
     try:
         pdf.output(out_path)
         return (True, "PDF created.")
