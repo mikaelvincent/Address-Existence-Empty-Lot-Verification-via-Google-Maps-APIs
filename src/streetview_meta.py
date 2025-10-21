@@ -39,6 +39,7 @@ class StreetViewMetaResult:
     sv_metadata_status: str
     sv_image_date: str
     sv_stale_flag: bool
+    api_error_codes: List[str]
 
 
 _SV_METADATA_ENDPOINT = "https://maps.googleapis.com/maps/api/streetview/metadata"
@@ -130,10 +131,14 @@ def fetch_sv_metadata_for_coord(
     retry: config_loader.RetryPolicy,
     logger: JsonlLogger,
     http_get=_http_get,
-) -> Tuple[str, str]:
-    """Return (sv_metadata_status, sv_image_date)."""
+) -> Tuple[str, str, List[str]]:
+    """Return (sv_metadata_status, sv_image_date, api_error_codes).
+
+    Per spec §12, persistent API errors must be surfaced for downstream routing to human review.
+    """
     last_status = "UNKNOWN_ERROR"
     image_date = ""
+    errs: List[str] = []
 
     for attempt in range(1, retry.max_attempts + 1):
         started = dt.datetime.now(dt.timezone.utc).isoformat()
@@ -167,15 +172,13 @@ def fetch_sv_metadata_for_coord(
                             "note": "OK",
                         }
                     )
-                    return status, image_date
+                    return status, image_date, errs
                 elif status in {
                     "ZERO_RESULTS",
                     "NOT_FOUND",
-                    "OVER_QUERY_LIMIT",
-                    "REQUEST_DENIED",
                     "INVALID_REQUEST",
-                    "UNKNOWN_ERROR",
                 }:
+                    # Not retryable / not considered an error for our purposes
                     logger.write(
                         {
                             "ts": started,
@@ -184,15 +187,12 @@ def fetch_sv_metadata_for_coord(
                             "location": params["location"],
                             "http_status": http_status,
                             "sv_metadata_status": status,
-                            "note": "Non-OK status",
+                            "note": "Terminal non-OK, non-error status",
                         }
                     )
-                    if status in {"ZERO_RESULTS", "INVALID_REQUEST"}:
-                        # Not retryable
-                        return status, ""
-                    # Otherwise retry on next loop
+                    return status, "", errs
                 else:
-                    # Unexpected body shape; retry
+                    # Retryable statuses
                     logger.write(
                         {
                             "ts": started,
@@ -200,9 +200,11 @@ def fetch_sv_metadata_for_coord(
                             "input_id": input_id,
                             "location": params["location"],
                             "http_status": http_status,
-                            "sv_metadata_status": "PARSE_ERROR",
+                            "sv_metadata_status": status,
+                            "note": "Retryable non-OK status",
                         }
                     )
+                    errs.append(f"SV_METADATA_{status}")
             else:
                 # HTTP error; possibly retry
                 logger.write(
@@ -215,7 +217,9 @@ def fetch_sv_metadata_for_coord(
                         "sv_metadata_status": f"HTTP_{http_status}",
                     }
                 )
+                errs.append(f"SV_METADATA_HTTP_{http_status}")
         except Exception as e:
+            errs.append(f"SV_METADATA_EXC_{e.__class__.__name__}")
             logger.write(
                 {
                     "ts": started,
@@ -232,7 +236,8 @@ def fetch_sv_metadata_for_coord(
             base = retry.base_seconds * (2 ** (attempt - 1))
             time.sleep(base)
 
-    return last_status, image_date
+    # Exhausted
+    return last_status, image_date, errs
 
 
 def run_sv_metadata(
@@ -274,12 +279,13 @@ def run_sv_metadata(
         status = ""
         date_s = ""
         stale = False
+        errs: List[str] = []
 
         if geocode_status == "OK" and lat_s and lng_s:
             try:
                 lat = float(lat_s)
                 lng = float(lng_s)
-                status, date_s = fetch_sv_metadata_for_coord(
+                status, date_s, errs = fetch_sv_metadata_for_coord(
                     input_id=input_id,
                     lat=lat,
                     lng=lng,
@@ -289,16 +295,18 @@ def run_sv_metadata(
                     http_get=http_get,
                 )
                 stale = _is_stale(status, date_s, cfg.thresholds.stale_years)
-            except Exception:
+            except Exception as e:
                 status = "UNKNOWN_ERROR"
                 date_s = ""
                 stale = False
+                errs.append(f"SV_METADATA_EXC_{e.__class__.__name__}")
 
         return ix, StreetViewMetaResult(
             input_id=input_id,
             sv_metadata_status=status,
             sv_image_date=date_s,
             sv_stale_flag=stale,
+            api_error_codes=errs,
         )
 
     # Execute with ThreadPoolExecutor, preserving order
@@ -320,6 +328,7 @@ def run_sv_metadata(
                 "sv_metadata_status",
                 "sv_image_date",
                 "sv_stale_flag",
+                "api_error_codes",
             ],
         )
         writer.writeheader()
@@ -331,6 +340,7 @@ def run_sv_metadata(
                     "sv_metadata_status": r.sv_metadata_status,
                     "sv_image_date": r.sv_image_date,
                     "sv_stale_flag": _format_bool(r.sv_stale_flag),
+                    "api_error_codes": "|".join(r.api_error_codes),
                 }
             )
 
