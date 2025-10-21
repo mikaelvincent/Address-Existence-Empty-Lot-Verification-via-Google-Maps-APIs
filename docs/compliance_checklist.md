@@ -24,7 +24,7 @@ Guardrails that apply across the entire project.
 ## Human Review Path
 - ✅ Deliverables embed Google Maps URLs for 1‑click spot checks by reviewers.
 
-## Implementation Notes (current modules)
+## Implementation Notes
 - ✅ CSV ingestion supports **single‑line** (`full_address`) or **multi‑field** schemas.
 - ✅ Rule‑based detection for non‑physical addresses (e.g., P.O. Box/CMRA patterns).
 - ✅ If `country` is missing but `postal_code` is a US ZIP, default country to **United States**.
