@@ -1,4 +1,4 @@
-.PHONY: install test normalize geocode
+.PHONY: install test normalize geocode svmeta
 
 PY?=python3
 
@@ -18,6 +18,15 @@ normalize:
 geocode:
 	$(PY) src/geocode.py \
 		--normalized "$(IN)" \
+		--output "$(OUT)" \
+		--config "config/config.yml" \
+		--log "$(LOG)"
+
+# Example:
+# make svmeta IN=data/geocode.csv OUT=data/streetview_meta.csv LOG=data/logs/streetview_meta_api_log.jsonl
+svmeta:
+	$(PY) src/streetview_meta.py \
+		--geocode "$(IN)" \
 		--output "$(OUT)" \
 		--config "config/config.yml" \
 		--log "$(LOG)"
