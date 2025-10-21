@@ -123,6 +123,11 @@ Street View **metadata** (status/date) shown in the CSV is for context; imagery 
 
 ---
 
+## Why this is in your queue
+This review kit includes only rows where **`final_flag ∈ {{LIKELY_EMPTY_LOT, NEEDS_HUMAN_REVIEW}}`**.
+- `LIKELY_EMPTY_LOT` — The automated signals suggest an empty lot (e.g., non‑rooftop geocode, no nearby footprint, Street View OK/zero‑results).
+- `NEEDS_HUMAN_REVIEW` — Signals are conflicting or insufficient for an automatic decision.
+
 ## Decisions you can make
 - `CONFIRM_VALID` — A principal structure is clearly present within the parcel / pin area.
 - `CONFIRM_EMPTY_LOT` — Land appears unbuilt (or only a minor shed/parking) consistent with an **empty lot**.
