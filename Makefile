@@ -1,4 +1,5 @@
-.PHONY: install test normalize geocode svmeta
+# Makefile
+.PHONY: install test normalize geocode svmeta footprints
 
 PY?=python3
 
@@ -27,6 +28,16 @@ geocode:
 svmeta:
 	$(PY) src/streetview_meta.py \
 		--geocode "$(IN)" \
+		--output "$(OUT)" \
+		--config "config/config.yml" \
+		--log "$(LOG)"
+
+# Example:
+# make footprints IN=data/geocode.csv FP="data/footprints/*.geojson" OUT=data/footprints.csv LOG=data/logs/footprints_log.jsonl
+footprints:
+	$(PY) src/footprints.py \
+		--geocode "$(IN)" \
+		--footprints $(FP) \
 		--output "$(OUT)" \
 		--config "config/config.yml" \
 		--log "$(LOG)"
