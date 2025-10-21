@@ -40,3 +40,45 @@ pytest -q
   * **Multi‑field**: any of `address_line1,address_line2,city,region,postal_code,country`.
 * If `country` is missing and `postal_code` matches a US ZIP, the country defaults to **United States**.
 * Secrets are read from environment variables referenced in the config file; none are required for Sprint 1.
+
+---
+
+# Sprint 2 — Geocoding integration and baseline signals
+
+This sprint integrates the **Google Geocoding API** to enrich each normalized row with geocoding signals.
+
+## What this delivers
+
+* `data/geocode.csv` with columns:
+
+  * `input_id`
+  * `input_address_raw`
+  * `geocode_status`
+  * `lat`
+  * `lng`
+  * `location_type`
+  * `api_error_codes`
+* API call log: `data/logs/geocode_api_log.jsonl` (PII‑safe)
+* **Cache** (SQLite) saving **only** lat/lng with TTL ≤ 30 days: `data/cache/geocode_cache.sqlite`
+
+## Run geocoding
+
+```bash
+python src/geocode.py \
+  --normalized data/normalized.csv \
+  --output data/geocode.csv \
+  --config config/config.yml \
+  --log data/logs/geocode_api_log.jsonl
+```
+
+Or via `make`:
+
+```bash
+make geocode IN=data/normalized.csv OUT=data/geocode.csv LOG=data/logs/geocode_api_log.jsonl
+```
+
+## Compliance notes
+
+* The cache persists **only** `lat`/`lng` with TTL ≤ 30 days (policy‑compliant).
+* No Street View images are fetched; this sprint uses only the Geocoding API.
+* Logs avoid storing full API payloads and redact secrets.
