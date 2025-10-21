@@ -19,11 +19,38 @@ python3 -m pip install -r requirements.txt
 ### 2) Configure
 
 * Edit [`config/config.yml`](config/config.yml) (keeps **names** of environment variables, not secrets).
-* Set environment variables for your keys:
+
+* **Provide secrets via environment variables** — recommended:
 
   * `GOOGLE_MAPS_API_KEY`
   * `GOOGLE_ADDRESS_VALIDATION_API_KEY`
-  * `GOOGLE_URL_SIGNING_SECRET` (optional; recommended by Google for some signed calls)
+  * `GOOGLE_URL_SIGNING_SECRET` (optional; recommended for certain signed URL calls)
+
+#### Option A — export in your shell
+
+```bash
+export GOOGLE_MAPS_API_KEY="your_key_here"
+export GOOGLE_ADDRESS_VALIDATION_API_KEY="your_key_here"
+# optional
+export GOOGLE_URL_SIGNING_SECRET="your_secret_here"
+```
+
+#### Option B — use a local `.env` file (convenient for dev)
+
+1. Create it from the example:
+
+   ```bash
+   cp .env.example .env
+   # open .env and paste your values
+   ```
+2. Load it for the current shell session:
+
+   ```bash
+   # bash/zsh
+   export $(grep -v '^#' .env | xargs)
+   ```
+
+   > If you prefer automation, tools like **direnv** or **python-dotenv** can auto‑load `.env`. No code changes are required because the app already reads from environment variables.
 
 **Policy notes**
 
