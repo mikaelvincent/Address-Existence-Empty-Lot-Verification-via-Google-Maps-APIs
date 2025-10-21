@@ -1,1 +1,1 @@
-src/__init__.py
+"""Address Existence & Empty‑Lot Verification — package marker."""
