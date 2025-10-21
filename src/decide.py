@@ -100,6 +100,7 @@ _REASON_ORDER = [
     "SV_OK",
     "SV_ZERO_RESULTS",
     "SV_STALE",
+    "API_FAILURE",  # persistent API errors after retries
 ]
 
 
@@ -142,7 +143,7 @@ def _decide_one(
     lat_s = (geo.get("lat") or "").strip()
     lng_s = (geo.get("lng") or "").strip()
     location_type = (geo.get("location_type") or "").strip()
-    api_error_codes = geo.get("api_error_codes", "")
+    api_error_codes = (geo.get("api_error_codes") or "").strip()
 
     std_address = val.get("std_address", "")
     validation_ran_flag = _to_bool(val.get("validation_ran_flag", "false"))
@@ -181,6 +182,12 @@ def _decide_one(
         reasons.add("SV_ZERO_RESULTS")
     if sv_stale_flag_b:
         reasons.add("SV_STALE")
+
+    # Persistent API errors from geocoding (after retries)
+    has_persistent_api_error = bool(api_error_codes) and geocode_status not in {"OK", "ZERO_RESULTS"}
+    if has_persistent_api_error:
+        reasons.add("API_FAILURE")
+
     if validation_ran_flag and validation_verdict == "INVALID":
         reasons.add("POSTAL_INVALID")
 
@@ -193,30 +200,35 @@ def _decide_one(
     if non_physical_flag_b:
         final_flag = "NON_PHYSICAL_ADDRESS"
     else:
-        # 1) Hard invalid
-        if geocode_status == "ZERO_RESULTS":
-            final_flag = "INVALID_ADDRESS"
-        elif validation_ran_flag and validation_verdict == "INVALID":
-            final_flag = "INVALID_ADDRESS"
+        # Short-circuit for persistent API errors (spec §12)
+        if has_persistent_api_error:
+            final_flag = "NEEDS_HUMAN_REVIEW"
         else:
-            # 3) Auto-valid
-            #   ROOFTOP AND (footprint_present OR (sv_status OK and NOT stale))
-            if location_type == "ROOFTOP" and (
-                footprint_present_flag_b
-                or (sv_metadata_status == "OK" and not sv_stale_flag_b)
-            ):
-                final_flag = "VALID_LOCATION"
-            # 4) Likely empty lot
-            elif (
-                location_type != "ROOFTOP"
-                and not footprint_present_flag_b
-                and (sv_metadata_status in {"OK", "ZERO_RESULTS"})
-                and not sv_stale_flag_b  # be conservative when stale
-            ):
-                final_flag = "LIKELY_EMPTY_LOT"
+            # 1) Hard invalid
+            if geocode_status == "ZERO_RESULTS":
+                final_flag = "INVALID_ADDRESS"
+            elif validation_ran_flag and validation_verdict == "INVALID":
+                final_flag = "INVALID_ADDRESS"
             else:
-                # 5) Needs human review (conflicts or anything else)
-                final_flag = "NEEDS_HUMAN_REVIEW"
+                # 3) Auto-valid
+                #   ROOFTOP AND (footprint_present OR (sv_status OK and NOT stale))
+                # Note: This is consistent with §7.6 example that stale SV + no footprint → review.
+                if location_type == "ROOFTOP" and (
+                    footprint_present_flag_b
+                    or (sv_metadata_status == "OK" and not sv_stale_flag_b)
+                ):
+                    final_flag = "VALID_LOCATION"
+                # 4) Likely empty lot
+                elif (
+                    location_type != "ROOFTOP"
+                    and not footprint_present_flag_b
+                    and (sv_metadata_status in {"OK", "ZERO_RESULTS"})
+                    and not sv_stale_flag_b  # be conservative when stale
+                ):
+                    final_flag = "LIKELY_EMPTY_LOT"
+                else:
+                    # 5) Needs human review (conflicts or anything else)
+                    final_flag = "NEEDS_HUMAN_REVIEW"
 
     # Google Maps URL (prefer coordinates when available)
     lat_f = _parse_float(lat_s)
