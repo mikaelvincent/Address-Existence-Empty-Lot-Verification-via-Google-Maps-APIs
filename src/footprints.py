@@ -1,4 +1,4 @@
-"""Building‑footprint proximity (Sprint 4)
+"""Building‑footprint proximity.
 
 - Reads data/geocode.csv (requires: input_id, geocode_status, lat, lng).
 - Loads footprint tiles (GeoJSON FeatureCollection, NDJSON Features, or CSV with columns lat,lng).
@@ -9,15 +9,13 @@
     * data/footprints.csv (input_id, footprint_within_m, footprint_present_flag)
     * data/logs/footprints_log.jsonl (optional JSONL log for diagnostics)
 
-Compliance notes:
-- Uses Microsoft Global ML Building Footprints dataset as referenced in the spec.
-- Only centroid points are stored locally; no Google content is cached here.
+Compliance:
+- Uses Microsoft Global ML Building Footprints dataset.
+- Only centroid points are stored locally; no Google content is cached.
 
 Numerics:
-- Centroid computation uses a **translated local origin** to avoid catastrophic
-  cancellation when polygons are very small (tens of meters) but coordinates are
-  large in magnitude (e.g., lon ≈ -122, lat ≈ 37). This stabilizes the shoelace
-  centroid formula for building footprints.
+- Centroid computation uses a translated local origin to stabilize the shoelace
+  centroid formula for small polygons.
 """
 
 from __future__ import annotations
@@ -67,7 +65,7 @@ def haversine_m(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
         math.sin(dphi / 2) ** 2
         + math.cos(phi1) * math.cos(phi2) * math.sin(dlmb / 2) ** 2
     )
-    c = 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
+    c = 2 * math.atan2(math.sqrt(1 - a), math.sqrt(a))
     return R * c
 
 
@@ -81,7 +79,7 @@ def _ring_area_and_centroid_xy(
 ) -> Tuple[float, Tuple[float, float]]:
     """Return (signed area in degrees^2, centroid (x,y)=lon,lat) for an outer ring.
 
-    Uses a numerically-stable variant of the shoelace centroid:
+    Uses a numerically stable variant of the shoelace centroid:
     - Translate coordinates to a local origin to reduce cancellation.
     - If the polygon is degenerate (|A|≈0), fall back to the bbox center.
     """
@@ -368,7 +366,7 @@ def run_footprints(
     log_path: Optional[str] = None,
     cell_deg: float = 0.01,
 ) -> int:
-    """Main entry: compute footprint proximity for all geocoded rows.
+    """Compute footprint proximity for all geocoded rows.
 
     Returns the number of processed rows (same as geocode rows).
     """
@@ -423,7 +421,7 @@ def run_footprints(
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Building‑footprint proximity (Sprint 4)."
+        description="Building‑footprint proximity computation."
     )
     parser.add_argument("--geocode", required=True, help="Path to data/geocode.csv")
     parser.add_argument(
