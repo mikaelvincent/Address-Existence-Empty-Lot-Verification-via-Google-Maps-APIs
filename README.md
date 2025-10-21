@@ -22,7 +22,7 @@ python3 -m pip install -r requirements.txt
 * Set environment variables for your keys:
 
   * `GOOGLE_MAPS_API_KEY`
-  * `GOOGLE_ADDRESS_VALIDATION_API_KEY` (only needed when using Address Validation)
+  * `GOOGLE_ADDRESS_VALIDATION_API_KEY`
   * `GOOGLE_URL_SIGNING_SECRET` (optional; recommended by Google for some signed calls)
 
 **Policy notes**
@@ -32,9 +32,7 @@ python3 -m pip install -r requirements.txt
 
 ### 3) Run (current pipeline)
 
-**Normalize → Geocode → Street View metadata → Footprints proximity**
-
-Using Python:
+**Normalize → Geocode → Street View metadata → Footprints proximity → Conditional Address Validation**
 
 ```bash
 # Normalize input CSV to data/normalized.csv
@@ -58,16 +56,22 @@ python src/streetview_meta.py \
   --log data/logs/streetview_meta_api_log.jsonl
 
 # Footprint proximity to data/footprints.csv
-# `--footprints` accepts one or more files or globs:
-#   - GeoJSON FeatureCollection
-#   - NDJSON with one Feature per line
-#   - CSV with headers: lat,lng
 python src/footprints.py \
   --geocode data/geocode.csv \
   --footprints data/footprints/*.geojson \
   --output data/footprints.csv \
   --config config/config.yml \
   --log data/logs/footprints_log.jsonl
+
+# Conditional Address Validation to data/validation.csv (logs to data/logs/)
+python src/validate_postal.py \
+  --geocode data/geocode.csv \
+  --svmeta data/streetview_meta.csv \
+  --footprints data/footprints.csv \
+  --normalized data/normalized.csv \
+  --output data/validation.csv \
+  --config config/config.yml \
+  --log data/logs/address_validation_api_log.jsonl
 ```
 
 Or via `make`:
@@ -77,31 +81,10 @@ make normalize IN=data/your_input.csv OUT=data/normalized.csv
 make geocode   IN=data/normalized.csv OUT=data/geocode.csv LOG=data/logs/geocode_api_log.jsonl
 make svmeta    IN=data/geocode.csv    OUT=data/streetview_meta.csv LOG=data/logs/streetview_meta_api_log.jsonl
 make footprints IN=data/geocode.csv FP="data/footprints/*.geojson" OUT=data/footprints.csv LOG=data/logs/footprints_log.jsonl
+make validate  GEOCODE=data/geocode.csv SVMETA=data/streetview_meta.csv FP=data/footprints.csv NORM=data/normalized.csv OUT=data/validation.csv LOG=data/logs/address_validation_api_log.jsonl
 ```
 
-**Determinism tip:** To make `sv_stale_flag` reproducible across reruns, set an anchor date:
-
-```bash
-export SV_ANCHOR_DATE_UTC=2025-01-01   # YYYY-MM-DD (UTC)
-```
-
----
-
-## Configuration highlights
-
-* **`thresholds.stale_years`** — flags Street View imagery as stale (default 7 years).
-* **`thresholds.footprint_radius_m`** — **presence radius** for building‑footprint proximity (default 20 m).
-* **`cache_policy.latlng_ttl_days`** — must be ≤ 30 (enforced).
-* **`concurrency.workers`** — thread pool size for API calls/modules.
-* **`retry`** — exponential backoff parameters.
-
----
-
-## Footprints module notes
-
-* Input footprints can be downloaded from the [Microsoft Global ML Building Footprints](https://github.com/microsoft/GlobalMLBuildingFootprints) repository (GeoJSON or CSV).
-* This module indexes **centroids** only (not polygons) using a fixed‑degree grid, then computes nearest‑neighbor distances via the **haversine** formula.
-* For very large regions, consider pre‑filtering tiles to your countries/states of interest or generating a centroids CSV to reduce memory.
+**Determinism tip:** This module writes no timestamps to CSV. API attempt times are logged in JSONL only.
 
 ---
 
@@ -113,14 +96,4 @@ export SV_ANCHOR_DATE_UTC=2025-01-01   # YYYY-MM-DD (UTC)
 * ✅ Cache **only** lat/lng (≤ 30 days) and cacheable **Google IDs**.
 * ❌ Do **not** scrape google.com/maps or export content beyond licensed API fields.
 
-See the full [Compliance Checklist](docs/compliance_checklist.md).
-
----
-
-## Tests
-
-```bash
-pytest -q
-```
-
-Unit tests cover ingestion determinism & PO Box detection, geocoding behavior (OK/zero‑results/retry), Street View metadata parsing/staleness, and building‑footprint proximity.
+> Address Validation calls are **selective** and run **only** on rows flagged by §7.5 triggers to control cost and preserve determinism.
