@@ -1,18 +1,16 @@
-"""Geocoding integration (Sprint 2)
+"""Geocoding integration.
 
 - Reads data/normalized.csv
 - Calls Google Geocoding API with retries/backoff and concurrency
 - Parses: geocode_status, lat, lng, location_type
-- Caching: stores ONLY lat/lng with TTL <= 30 days (policy-compliant)
+- Caching: stores ONLY lat/lng with TTL ≤ 30 days (policy‑compliant)
 - Writes:
     * data/geocode.csv
-    * data/logs/geocode_api_log.jsonl (API attempt logs, PII-safe)
+    * data/logs/geocode_api_log.jsonl (API attempt logs, PII‑safe)
 - Deterministic: preserves input order; no timestamps in CSV output
-  (timestamps are written to logs only to maintain deterministic CSVs)
 
-Compliance notes:
-- Do NOT cache other Google Maps response content beyond lat/lng and
-  permitted IDs (none used here). See docs/compliance_checklist.md.
+Compliance:
+- Do NOT cache other Google Maps response content beyond lat/lng and permitted IDs.
 """
 
 from __future__ import annotations
@@ -436,7 +434,7 @@ def geocode_file(
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Geocode addresses (Sprint 2).")
+    parser = argparse.ArgumentParser(description="Geocode addresses.")
     parser.add_argument(
         "--normalized", required=True, help="Path to data/normalized.csv"
     )
