@@ -1,5 +1,5 @@
 # Makefile
-.PHONY: install test normalize geocode svmeta footprints validate
+.PHONY: install test normalize geocode svmeta footprints validate decide
 
 PY?=python3
 
@@ -53,3 +53,16 @@ validate:
 		--output "$(OUT)" \
 		--config "config/config.yml" \
 		--log "$(LOG)"
+
+# Example:
+# make decide GEOCODE=data/geocode.csv SVMETA=data/streetview_meta.csv FP=data/footprints.csv VALID=data/validation.csv NORM=data/normalized.csv OUT=data/enhanced.csv QA=data/logs/decision_summary.json
+decide:
+	$(PY) src/decide.py \
+		--geocode "$(GEOCODE)" \
+		--svmeta "$(SVMETA)" \
+		--footprints "$(FP)" \
+		--validation "$(VALID)" \
+		--normalized "$(NORM)" \
+		--output "$(OUT)" \
+		--config "config/config.yml" \
+		--summary "$(QA)"
