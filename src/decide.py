@@ -1,3 +1,4 @@
+# src/decide.py
 """Decision engine & Maps URL generation.
 
 Inputs (CSV; join key: input_id):
@@ -9,7 +10,7 @@ Inputs (CSV; join key: input_id):
 
 Outputs:
   - data/enhanced.csv (schema documented in docs/spec; see repository docs)
-  - Optional QA summary JSON (counts per `final_flag`)
+  - Optional QA summary JSON (counts per `final_flag` + deterministic run key)
 
 Rules:
   - Apply explicit rule order and reason codes as documented in the spec.
@@ -26,6 +27,10 @@ Determinism:
   - Column `run_timestamp_utc` defaults to the current UTC time (ISO‑8601).
   - To anchor for reproducible tests, set env RUN_ANCHOR_TIMESTAMP_UTC
     to an ISO‑8601 timestamp (e.g., "2025-01-01T00:00:00+00:00").
+
+Idempotency:
+  - We compute a run key `rk1|<sha256(input_csv_bytes || config_yaml_bytes)>` and include it
+    in the summary JSON to uniquely identify a run configuration (§7.8).
 """
 
 from __future__ import annotations
@@ -33,6 +38,7 @@ from __future__ import annotations
 import argparse
 import csv
 import datetime as dt
+import hashlib
 import json
 import os
 from dataclasses import dataclass
@@ -89,6 +95,25 @@ def _anchor_timestamp() -> str:
         except Exception:
             pass
     return dt.datetime.now(dt.timezone.utc).isoformat()
+
+
+def _compute_run_key(input_csv_path: str, config_path: str) -> str:
+    """Compute deterministic run key from input CSV bytes + config YAML bytes.
+
+    Format: rk1|<sha256 hex of input_bytes + b'||' + config_bytes>
+    """
+    try:
+        with open(input_csv_path, "rb") as f_in:
+            input_bytes = f_in.read()
+    except Exception:
+        input_bytes = b""
+    try:
+        with open(config_path, "rb") as f_cfg:
+            cfg_bytes = f_cfg.read()
+    except Exception:
+        cfg_bytes = b""
+    payload = input_bytes + b"||" + cfg_bytes
+    return "rk1|" + hashlib.sha256(payload).hexdigest()
 
 
 # Controlled vocabulary ordering for deterministic reason code lists
@@ -324,12 +349,12 @@ def _write_enhanced_csv(out_path: str, rows: List[EnhancedRow]) -> None:
             w.writerow(r.__dict__)
 
 
-def _write_summary_json(summary_path: Optional[str], counts: Dict[str, int]) -> None:
+def _write_summary_json(summary_path: Optional[str], counts: Dict[str, int], run_key: str) -> None:
     if not summary_path:
         return
     Path(os.path.dirname(summary_path) or ".").mkdir(parents=True, exist_ok=True)
     with open(summary_path, "w", encoding="utf-8") as f:
-        json.dump({"final_flag_counts": counts}, f, ensure_ascii=False, indent=2)
+        json.dump({"run_key": run_key, "final_flag_counts": counts}, f, ensure_ascii=False, indent=2)
 
 
 def run_decision(
@@ -370,7 +395,10 @@ def run_decision(
         counts[row.final_flag] = counts.get(row.final_flag, 0) + 1
 
     _write_enhanced_csv(output_csv_path, enhanced)
-    _write_summary_json(summary_json_path, counts)
+
+    # Deterministic idempotency key to help correlate runs (§7.8)
+    run_key = _compute_run_key(normalized_csv_path, config_path)
+    _write_summary_json(summary_json_path, counts, run_key)
     return len(enhanced)
 
 
@@ -389,7 +417,7 @@ def main() -> None:
         "--summary",
         required=False,
         default="data/logs/decision_summary.json",
-        help="Path to summary JSON with counts (default: data/logs/decision_summary.json)",
+        help="Path to summary JSON with counts + run key (default: data/logs/decision_summary.json)",
     )
     args = parser.parse_args()
 
