@@ -1,0 +1,41 @@
+# Configuration for Address Existence & Empty‑Lot Verification
+# Sprint 1 focuses on bootstrap, compliance guardrails, and ingestion.
+
+project:
+  name: "address-existence-empty-lot-verification"
+  version: "0.1.0"
+
+api:
+  # Secrets are not stored here. We only store the ENV VAR NAMES to read at runtime.
+  google_maps_api_key_env: "GOOGLE_MAPS_API_KEY"
+  address_validation_api_key_env: "GOOGLE_ADDRESS_VALIDATION_API_KEY"
+  url_signing_secret_env: "GOOGLE_URL_SIGNING_SECRET"  # optional (recommended by Google for certain calls)
+
+thresholds:
+  stale_years: 7            # for Street View staleness (used in later sprints)
+  footprint_radius_m: 20    # for building-footprint proximity (used in later sprints)
+
+retry:
+  max_attempts: 3
+  base_seconds: 0.5
+  jitter_seconds: 0.25
+
+concurrency:
+  workers: 10
+
+defaults:
+  # If country is missing but postal_code matches a US ZIP, assume United States.
+  country_if_us_zip: "United States"
+
+cache_policy:
+  # Per Google Maps Platform Service-Specific Terms:
+  # Latitude/longitude values (including geocoded results) may be cached <= 30 days.
+  # This tool will enforce TTL <= 30 days.
+  latlng_ttl_days: 30
+
+compliance:
+  # Guardrails referenced in docs/compliance_checklist.md
+  no_scraping: true
+  use_official_apis_only: true
+  use_street_view_metadata_only_in_automation: true
+  maps_urls_ok_for_human_review: true
