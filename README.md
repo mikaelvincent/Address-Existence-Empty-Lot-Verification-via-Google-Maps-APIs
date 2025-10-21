@@ -74,24 +74,6 @@ export SV_ANCHOR_DATE_UTC=2025-01-01   # YYYY-MM-DD (UTC)
 
 ---
 
-## What you get (current modules)
-
-* **`data/normalized.csv`**
-  `input_id` (stable SHA‑256 of `v1|<input_address_raw>`), `input_address_raw`, `non_physical_flag`.
-
-* **`data/geocode.csv`**
-  `input_id`, `input_address_raw`, `geocode_status`, `lat`, `lng`, `location_type`, `api_error_codes`.
-  📄 Logs: `data/logs/geocode_api_log.jsonl`.
-  🗃️ Cache: `data/cache/geocode_cache.sqlite` storing **lat/lng only** (TTL ≤ 30 days).
-
-* **`data/streetview_meta.csv`**
-  `input_id`, `sv_metadata_status`, `sv_image_date` (`YYYY-MM` or `YYYY`), `sv_stale_flag`.
-  📄 Logs: `data/logs/streetview_meta_api_log.jsonl`.
-
-For the full target output schema and decision logic, see the **Enhanced CSV** and rule set in the [Development Spec](devspec/dev_spec_and_plan.md) §5–§7.
-
----
-
 ## Configuration highlights
 
 * **`thresholds.stale_years`** — flags Street View imagery as stale (default 7 years).
