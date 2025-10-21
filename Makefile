@@ -1,5 +1,5 @@
 # Makefile
-.PHONY: install test normalize geocode svmeta footprints validate decide
+.PHONY: install test normalize geocode svmeta footprints validate decide review
 
 PY?=python3
 
@@ -66,3 +66,14 @@ decide:
 		--output "$(OUT)" \
 		--config "config/config.yml" \
 		--summary "$(QA)"
+
+# Example:
+# make review IN=data/enhanced.csv QOUT=data/review_queue.csv LTOUT=data/review_log_template.csv RMD=docs/reviewer_rubric.md RPDF=docs/reviewer_rubric.pdf
+review:
+	$(PY) src/review_pack.py \
+		--enhanced "$(IN)" \
+		--queue-out "$(QOUT)" \
+		--log-template-out "$(LTOUT)" \
+		--rubric-out-md "$(RMD)" \
+		--rubric-out-pdf "$(RPDF)" \
+		--config "config/config.yml"
