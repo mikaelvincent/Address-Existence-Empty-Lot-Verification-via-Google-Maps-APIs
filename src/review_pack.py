@@ -191,7 +191,7 @@ def _latin1_sanitize(text: str) -> str:
         "\u2026": "...",  # ellipsis …
         "\u200B": "",     # zero-width space
         "\u2060": "",     # word joiner
-        "\u00A0": " ",    # non-breaking space (Latin-1 but normalize to plain space)
+        "\u00A0": " ",    # non-breaking space
     }
     out = text
     for k, v in replacements.items():
@@ -208,6 +208,11 @@ def _write_text_pdf(text: str, out_path: str) -> Tuple[bool, str]:
     """
     try:
         from fpdf import FPDF  # type: ignore
+        try:
+            # fpdf2 enums (available in recent versions)
+            from fpdf.enums import WrapMode  # type: ignore
+        except Exception:
+            WrapMode = None  # type: ignore
     except Exception:
         return (False, "fpdf2 not installed; skipping PDF (Markdown was written).")
 
@@ -218,6 +223,9 @@ def _write_text_pdf(text: str, out_path: str) -> Tuple[bool, str]:
     # Use core font with Latin-1 encoding; avoid deprecated Arial alias.
     pdf.set_font("helvetica", size=12)
 
+    # Compute an explicit usable width for multi_cell to avoid edge wrapping issues.
+    usable_w = max(20, pdf.w - pdf.l_margin - pdf.r_margin)  # defensive lower bound
+
     # Split markdown to lines and render as plain text blocks.
     for line in text.splitlines():
         # Render headings as plain lines (strip leading #)
@@ -225,11 +233,18 @@ def _write_text_pdf(text: str, out_path: str) -> Tuple[bool, str]:
             line = line.lstrip("#").strip()
         sanitized = _latin1_sanitize(line)
         try:
-            pdf.multi_cell(0, 6, text=sanitized)
+            if WrapMode:
+                pdf.multi_cell(usable_w, 6, text=sanitized, wrapmode=WrapMode.CHAR)
+            else:
+                # Older fpdf2: no enum available; rely on width alone
+                pdf.multi_cell(usable_w, 6, text=sanitized)
         except Exception:
-            # Last-resort fallback: force-encode to latin-1 ignoring errors
+            # Last-resort fallback: force-encode to latin-1 ignoring errors and write char-wrapped
             sanitized_fallback = sanitized.encode("latin-1", "ignore").decode("latin-1")
-            pdf.multi_cell(0, 6, text=sanitized_fallback)
+            if WrapMode:
+                pdf.multi_cell(usable_w, 6, text=sanitized_fallback, wrapmode=WrapMode.CHAR)
+            else:
+                pdf.multi_cell(usable_w, 6, text=sanitized_fallback)
 
     try:
         pdf.output(out_path)
