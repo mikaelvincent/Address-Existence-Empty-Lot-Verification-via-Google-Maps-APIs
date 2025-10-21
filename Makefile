@@ -1,5 +1,5 @@
 # Makefile
-.PHONY: install test normalize geocode svmeta footprints
+.PHONY: install test normalize geocode svmeta footprints validate
 
 PY?=python3
 
@@ -38,6 +38,18 @@ footprints:
 	$(PY) src/footprints.py \
 		--geocode "$(IN)" \
 		--footprints $(FP) \
+		--output "$(OUT)" \
+		--config "config/config.yml" \
+		--log "$(LOG)"
+
+# Example:
+# make validate GEOCODE=data/geocode.csv SVMETA=data/streetview_meta.csv FP=data/footprints.csv NORM=data/normalized.csv OUT=data/validation.csv LOG=data/logs/address_validation_api_log.jsonl
+validate:
+	$(PY) src/validate_postal.py \
+		--geocode "$(GEOCODE)" \
+		--svmeta "$(SVMETA)" \
+		--footprints "$(FP)" \
+		--normalized "$(NORM)" \
 		--output "$(OUT)" \
 		--config "config/config.yml" \
 		--log "$(LOG)"
