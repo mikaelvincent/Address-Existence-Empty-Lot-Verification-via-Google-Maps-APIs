@@ -1,8 +1,7 @@
-"""YAML configuration loader with environment-based secret resolution.
+"""YAML configuration loader with environment‑based secret resolution.
 
-Notes (Sprint 1):
-- Secrets are NOT stored in the YAML file; only the ENV VAR names are.
-- We validate cache TTL constraints (<= 30 days) to respect Google Maps Platform terms.
+- Secrets are not stored in YAML; only environment variable names are.
+- Enforces policy checks (e.g., lat/lng cache TTL ≤ 30 days).
 """
 
 from __future__ import annotations
@@ -108,7 +107,7 @@ def _require_key(d: Dict[str, Any], key: str) -> Any:
 def load_config(path: str) -> Config:
     """Load and validate YAML configuration from `path`.
 
-    Environment variables are not required in Sprint 1 but are resolved via helper methods.
+    Environment variables are not required at parse time; helpers resolve them at runtime.
     """
     with open(path, "r", encoding="utf-8") as f:
         raw = yaml.safe_load(f) or {}
