@@ -1,29 +1,28 @@
-"""Decision engine & Maps URL generation (Sprint 6)
+"""Decision engine & Maps URL generation.
 
 Inputs (CSV; join key: input_id):
-  - data/normalized.csv      (from Sprint 1; includes non_physical_flag)
-  - data/geocode.csv         (from Sprint 2; includes input_address_raw, geocode_status, lat, lng, location_type, api_error_codes)
-  - data/streetview_meta.csv (from Sprint 3; includes sv_metadata_status, sv_image_date, sv_stale_flag)
-  - data/footprints.csv      (from Sprint 4; includes footprint_within_m, footprint_present_flag)
-  - data/validation.csv      (from Sprint 5; includes std_address, validation_ran_flag, validation_verdict)
+  - data/normalized.csv      (non_physical_flag)
+  - data/geocode.csv         (input_address_raw, geocode_status, lat, lng, location_type, api_error_codes)
+  - data/streetview_meta.csv (sv_metadata_status, sv_image_date, sv_stale_flag)
+  - data/footprints.csv      (footprint_within_m, footprint_present_flag)
+  - data/validation.csv      (std_address, validation_ran_flag, validation_verdict)
 
 Outputs:
-  - data/enhanced.csv (schema in spec §5.1)
+  - data/enhanced.csv (schema documented in docs/spec; see repository docs)
   - Optional QA summary JSON (counts per `final_flag`)
 
-Rule set:
-  - §7.6 in the spec defines the order and reason codes.
-  - §12 edge case: P.O. Boxes (non-physical) are ALWAYS labeled NON_PHYSICAL_ADDRESS,
-    regardless of postal validation outcome. We therefore elevate that check.
+Rules:
+  - Apply explicit rule order and reason codes as documented in the spec.
+  - Edge case: P.O. Boxes (non‑physical) are ALWAYS labeled NON_PHYSICAL_ADDRESS.
 
 Compliance:
   - Generates only Google Maps **URLs** for human review (no scraping, no API here).
   - Uses only signals produced by official Google APIs in prior steps.
 
 Determinism:
-  - Column `run_timestamp_utc` defaults to the current UTC time in ISO-8601.
-  - To make runs reproducible for tests, set env RUN_ANCHOR_TIMESTAMP_UTC
-    to an ISO-8601 timestamp (e.g., "2025-01-01T00:00:00+00:00").
+  - Column `run_timestamp_utc` defaults to the current UTC time (ISO‑8601).
+  - To anchor for reproducible tests, set env RUN_ANCHOR_TIMESTAMP_UTC
+    to an ISO‑8601 timestamp (e.g., "2025-01-01T00:00:00+00:00").
 """
 
 from __future__ import annotations
@@ -190,7 +189,7 @@ def _decide_one(
         notes = f"SV date {sv_image_date}"
 
     # Decision order
-    # §12 Edge case override: Non-physical always labeled NON_PHYSICAL_ADDRESS.
+    # Edge-case override: Non-physical always labeled NON_PHYSICAL_ADDRESS.
     if non_physical_flag_b:
         final_flag = "NON_PHYSICAL_ADDRESS"
     else:
@@ -306,7 +305,7 @@ def run_decision(
     config_path: str,
     summary_json_path: Optional[str] = None,
 ) -> int:
-    """Main entry: join inputs, apply rules, write enhanced.csv, and summary JSON.
+    """Join inputs, apply rules, write enhanced.csv, and optional summary JSON.
 
     Returns the number of processed rows.
     """
@@ -340,7 +339,7 @@ def run_decision(
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Decision engine & Maps URL generation (Sprint 6)."
+        description="Decision engine & Maps URL generation."
     )
     parser.add_argument("--geocode", required=True, help="Path to data/geocode.csv")
     parser.add_argument("--svmeta", required=True, help="Path to data/streetview_meta.csv")
