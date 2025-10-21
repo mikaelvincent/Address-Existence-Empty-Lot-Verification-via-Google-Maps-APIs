@@ -1,18 +1,18 @@
-"""Human‑review kit generator (Sprint 7)
+"""Human‑review kit generator.
 
-- Input:  data/enhanced.csv (authoritative deliverable from Sprint 6)
-- Output:
+Input:  data/enhanced.csv
+Outputs:
     * data/review_queue.csv
     * data/review_log_template.csv
     * docs/reviewer_rubric.md
-    * docs/reviewer_rubric.pdf   (optional; created if fpdf2 is installed)
+    * docs/reviewer_rubric.pdf (optional; created if fpdf2 is installed)
 
-What goes into the review queue?
+Queue criteria:
 - Rows where final_flag ∈ {LIKELY_EMPTY_LOT, NEEDS_HUMAN_REVIEW}
 
 Why these columns?
 - Reviewers need a 1‑click Maps URL and compact evidence (precision, footprints,
-  Street View status/date/staleness, validation summary) to make a fast call.
+  Street View status/date/staleness, validation summary) to decide quickly.
 
 Compliance:
 - Generates documents and CSVs only. No API calls. No scraping.
@@ -111,10 +111,7 @@ def _write_review_log_template(rows: List[Dict[str, str]], out_path: str) -> int
 
 
 def _build_rubric_markdown(stale_years: int) -> str:
-    """Return rubric text (Markdown).
-
-    Keeps content self‑contained and deterministic.
-    """
+    """Return rubric text (Markdown)."""
     return f"""# Reviewer Rubric — Address Existence & Empty‑Lot Verification
 
 This rubric guides human reviewers who open the **Google Maps URL** for each queued row.
@@ -294,7 +291,7 @@ def run_review_pack(
 
 
 def main() -> None:
-    p = argparse.ArgumentParser(description="Generate the human‑review kit (Sprint 7).")
+    p = argparse.ArgumentParser(description="Generate the human‑review kit.")
     p.add_argument("--enhanced", required=True, help="Path to data/enhanced.csv")
     p.add_argument(
         "--queue-out",
