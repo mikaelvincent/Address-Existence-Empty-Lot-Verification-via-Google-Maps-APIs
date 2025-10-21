@@ -1,19 +1,19 @@
-"""CSV ingestion & normalization (Sprint 1)
+"""CSV ingestion and normalization.
 
-Outputs: data/normalized.csv with columns:
-- input_id: stable SHA-256 hex of canonicalized address parts (v1|<input_address_raw>)
-- input_address_raw: normalized address string used later for geocoding
+Outputs `data/normalized.csv` with columns:
+- input_id: SHA-256 hex of canonicalized address parts (v1|<input_address_raw>)
+- input_address_raw: normalized address string for downstream geocoding
 - non_physical_flag: boolean (true/false)
 
 Schema detection:
-- If 'full_address' is present -> single-line mode
+- If 'full_address' is present → single-line mode
 - Else multi-field mode with any subset of:
   address_line1, address_line2, city, region, postal_code, country
 
 Normalization:
 - Trim and collapse internal whitespace for each part
-- Preserve casing and punctuation in the resulting `input_address_raw`
-- If `country` is missing but `postal_code` matches US ZIP -> default to "United States"
+- Preserve casing and punctuation in `input_address_raw`
+- If `country` is missing but `postal_code` matches a US ZIP → default to "United States"
 """
 
 from __future__ import annotations
@@ -158,7 +158,7 @@ def normalize_file(
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Normalize address CSV (Sprint 1).")
+    parser = argparse.ArgumentParser(description="Normalize address CSV.")
     parser.add_argument("--input", required=True, help="Path to input CSV.")
     parser.add_argument(
         "--output", required=True, help="Path to write data/normalized.csv."
