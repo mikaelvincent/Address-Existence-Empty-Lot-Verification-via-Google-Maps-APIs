@@ -82,3 +82,50 @@ make geocode IN=data/normalized.csv OUT=data/geocode.csv LOG=data/logs/geocode_a
 * The cache persists **only** `lat`/`lng` with TTL ≤ 30 days (policy‑compliant).
 * No Street View images are fetched; this sprint uses only the Geocoding API.
 * Logs avoid storing full API payloads and redact secrets.
+
+---
+
+# Sprint 3 — Street View metadata integration
+
+Attach Street View availability and capture date to each geocoded row using the **Street View Static API — metadata endpoint**.
+
+## What this delivers
+
+* `data/streetview_meta.csv` with columns:
+
+  * `input_id`
+  * `sv_metadata_status` (`OK`, `ZERO_RESULTS`, `NOT_FOUND`, etc.)
+  * `sv_image_date` (`YYYY-MM` or `YYYY` when present)
+  * `sv_stale_flag` (`true` if older than configured `stale_years`, or `true` when status is `OK` but date is missing)
+
+* API call log: `data/logs/streetview_meta_api_log.jsonl` (PII‑safe)
+
+## Run Street View metadata
+
+```bash
+python src/streetview_meta.py \
+  --geocode data/geocode.csv \
+  --output data/streetview_meta.csv \
+  --config config/config.yml \
+  --log data/logs/streetview_meta_api_log.jsonl
+```
+
+Or via `make`:
+
+```bash
+make svmeta IN=data/geocode.csv OUT=data/streetview_meta.csv LOG=data/logs/streetview_meta_api_log.jsonl
+```
+
+### Determinism tip
+
+To make `sv_stale_flag` reproducible across reruns, set an anchor date:
+
+```bash
+export SV_ANCHOR_DATE_UTC=2025-01-01   # YYYY-MM-DD (UTC)
+```
+
+### Compliance notes
+
+* This sprint calls the **metadata** endpoint only; **no Street View images** are downloaded programmatically.
+* Metadata requests require an API key and are **no-charge**; only image loads are billed.
+* Passing `location=<lat,lng>` triggers Google’s automatic panorama search (~50 m) which is **not configurable** on the metadata endpoint.
