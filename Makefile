@@ -1,5 +1,5 @@
 # Makefile
-.PHONY: install test normalize geocode svmeta footprints validate decide review
+.PHONY: install test normalize geocode svmeta footprints validate decide review report
 
 PY?=python3
 
@@ -76,4 +76,16 @@ review:
 		--log-template-out "$(LTOUT)" \
 		--rubric-out-md "$(RMD)" \
 		--rubric-out-pdf "$(RPDF)" \
+		--config "config/config.yml"
+
+# Example:
+# make report ENH=data/enhanced.csv REV=data/review_log_completed.csv FINAL=data/final_enhanced.csv MD=docs/run_report.md PDF=docs/run_report.pdf JLOG=data/logs/final_decisions.jsonl
+report:
+	$(PY) src/reporting.py \
+		--enhanced "$(ENH)" \
+		--reviews "$(REV)" \
+		--final-out "$(FINAL)" \
+		--report-md "$(MD)" \
+		--report-pdf "$(PDF)" \
+		--log-jsonl "$(JLOG)" \
 		--config "config/config.yml"
