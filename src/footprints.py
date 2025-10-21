@@ -1,21 +1,17 @@
 """Building‑footprint proximity.
 
-- Reads data/geocode.csv (requires: input_id, geocode_status, lat, lng).
-- Loads footprint tiles (GeoJSON FeatureCollection, NDJSON Features, or CSV with columns lat,lng).
-- Builds a lightweight grid index of centroid points (pure stdlib).
-- For each geocoded coordinate, computes nearest‑centroid haversine distance (meters).
-- Presence flag is true when the nearest centroid lies within `thresholds.footprint_radius_m`.
+- Reads data/geocode.csv (requires: input_id, geocode_status, lat, lng)
+- Loads footprint tiles (GeoJSON FeatureCollection, NDJSON Features, or CSV with columns lat,lng)
+- Builds a lightweight grid index of centroid points (pure stdlib)
+- For each geocoded coordinate, computes nearest‑centroid haversine distance (meters)
+- Presence flag is true when the nearest centroid lies within the configured radius
 - Writes:
     * data/footprints.csv (input_id, footprint_within_m, footprint_present_flag)
-    * data/logs/footprints_log.jsonl (optional JSONL log for diagnostics)
+    * data/logs/footprints_log.jsonl (optional JSONL summary)
 
-Compliance:
-- Uses Microsoft Global ML Building Footprints dataset.
-- Only centroid points are stored locally; no Google content is cached.
-
-Numerics:
-- Centroid computation uses a translated local origin to stabilize the shoelace
-  centroid formula for small polygons.
+Notes:
+- Uses Microsoft Global ML Building Footprints dataset; only centroids are stored locally.
+- Centroid computation is stable for small polygons via a translated origin.
 """
 
 from __future__ import annotations
@@ -65,7 +61,7 @@ def haversine_m(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
         math.sin(dphi / 2) ** 2
         + math.cos(phi1) * math.cos(phi2) * math.sin(dlmb / 2) ** 2
     )
-    c = 2 * math.atan2(math.sqrt(1 - a), math.sqrt(a))
+    c = 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
     return R * c
 
 
@@ -79,9 +75,7 @@ def _ring_area_and_centroid_xy(
 ) -> Tuple[float, Tuple[float, float]]:
     """Return (signed area in degrees^2, centroid (x,y)=lon,lat) for an outer ring.
 
-    Uses a numerically stable variant of the shoelace centroid:
-    - Translate coordinates to a local origin to reduce cancellation.
-    - If the polygon is degenerate (|A|≈0), fall back to the bbox center.
+    Numerically-stable shoelace centroid with local-origin translation. If degenerate, returns bbox center.
     """
     if not ring or len(ring) < 3:
         return 0.0, (float("nan"), float("nan"))
@@ -104,7 +98,6 @@ def _ring_area_and_centroid_xy(
 
     A *= 0.5
     if abs(A) < 1e-24:
-        # Degenerate; use bbox center (original coordinates)
         xs = [p[0] for p in pts[:-1]]
         ys = [p[1] for p in pts[:-1]]
         return 0.0, ((min(xs) + max(xs)) / 2.0, (min(ys) + max(ys)) / 2.0)
@@ -246,15 +239,25 @@ class GridIndex:
         """Yield candidate points from the minimal neighborhood of cells covering `radius_m`."""
         # Degree deltas for a lat/lng window approximating the radius
         deg_lat = radius_m / 111_320.0  # meters per degree latitude
-        cos_lat = max(0.01, math.cos(math.radians(lat)))
+        # Use absolute cosine and clamp away from 0 to avoid exploding longitudes near poles.
+        cos_lat = max(0.01, abs(math.cos(math.radians(lat))))
         deg_lng = radius_m / (111_320.0 * cos_lat)
         di = int(math.ceil(deg_lat / self.cell_deg))
         dj = int(math.ceil(deg_lng / self.cell_deg))
+        # Ensure we always scan at least the current cell
+        di = max(di, 1)
+        dj = max(dj, 1)
         ci, cj = self._key(lat, lng)
         for i in range(ci - di, ci + di + 1):
             for j in range(cj - dj, cj + dj + 1):
                 for p in self._cells.get((i, j), []):
                     yield p
+
+    def all_points(self) -> Iterable[Tuple[float, float]]:
+        """Iterate all points in the index (used as a rare fallback)."""
+        for bucket in self._cells.values():
+            for p in bucket:
+                yield p
 
 
 # ------------------------------
@@ -307,14 +310,29 @@ def build_index(footprint_paths: Sequence[str], cell_deg: float = 0.01) -> GridI
 def nearest_distance_m(
     idx: GridIndex, lat: float, lng: float, radius_m: float
 ) -> Tuple[bool, int]:
-    """Return (present_flag, distance_m_rounded_or_neg1)."""
-    best = None
+    """Return (present_flag, distance_m_rounded_or_neg1).
+
+    Fast path: scan only nearby cells that cover `radius_m`.
+    Fallback: if no candidates are found (rare edge case), scan entire index.
+    """
+    best: Optional[float] = None
+    saw_any = False
+
     for clat, clng in idx.neighbors_within(lat, lng, radius_m):
+        saw_any = True
         d = haversine_m(lat, lng, clat, clng)
         if best is None or d < best:
             best = d
             if best <= radius_m:
                 break
+
+    if not saw_any:
+        # Rare fallback for extremely small radii + coarse cells or platform quirks.
+        for clat, clng in idx.all_points():
+            d = haversine_m(lat, lng, clat, clng)
+            if best is None or d < best:
+                best = d
+
     if best is None or best > radius_m:
         return (False, -1)
     return (True, int(round(best)))
@@ -421,7 +439,7 @@ def run_footprints(
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Building‑footprint proximity computation."
+        description="Building‑footprint proximity."
     )
     parser.add_argument("--geocode", required=True, help="Path to data/geocode.csv")
     parser.add_argument(
