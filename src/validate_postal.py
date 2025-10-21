@@ -1,31 +1,32 @@
-"""Conditional Address Validation (Sprint 5)
+"""Conditional Address Validation.
 
-- Inputs (CSV; join key: input_id):
-    * data/geocode.csv          (from Sprint 2; includes input_address_raw, location_type)
-    * data/streetview_meta.csv  (from Sprint 3)
-    * data/footprints.csv       (from Sprint 4)
-    * data/normalized.csv       (from Sprint 1; includes non_physical_flag)
+Inputs (CSV; join key: input_id):
+    * data/geocode.csv          (includes input_address_raw, location_type)
+    * data/streetview_meta.csv  (metadata status/date/stale)
+    * data/footprints.csv       (proximity flags)
+    * data/normalized.csv       (non_physical_flag)
 
-- Triggers (§7.5): run Address Validation when ANY of:
-    * location_type in {RANGE_INTERPOLATED, GEOMETRIC_CENTER, APPROXIMATE}; or
-    * footprint_present_flag == false; or
-    * sv_metadata_status == ZERO_RESULTS; or
-    * sv_stale_flag == true; or
+Validation runs when ANY of:
+    * location_type in {RANGE_INTERPOLATED, GEOMETRIC_CENTER, APPROXIMATE}
+    * footprint_present_flag == false
+    * sv_metadata_status == ZERO_RESULTS
+    * sv_stale_flag == true
     * non_physical_flag == true
 
-- API: Google Address Validation — v1:validateAddress
-- Output:
+API: Google Address Validation — v1:validateAddress
+
+Output:
     * data/validation.csv with columns:
         input_id, std_address, validation_ran_flag, validation_verdict
       (one row per input_id; NOT_RUN when validation was skipped)
 
-- Compliance notes:
+Compliance:
     * Uses only the official Address Validation API.
     * Sends freeform address via address.addressLines.
     * Secrets are read from environment via config_loader (no keys in repo).
     * Retries 429/5xx with exponential backoff (deterministic base; no jitter).
 
-Usage (CLI):
+CLI:
     python src/validate_postal.py \
       --geocode data/geocode.csv \
       --svmeta data/streetview_meta.csv \
@@ -118,10 +119,7 @@ class JsonlLogger:
 
 
 def _granularity_rank(g: Optional[str]) -> int:
-    """Order for validationGranularity to compare '>= PREMISE'.
-
-    Ranks chosen defensively based on documented enum names.
-    """
+    """Order for validationGranularity to compare '>= PREMISE'."""
     g = (g or "").upper()
     order = {
         "GRANULARITY_UNSPECIFIED": 0,
@@ -138,13 +136,12 @@ def _granularity_rank(g: Optional[str]) -> int:
 def _derive_verdict(v: Optional[Dict[str, Any]]) -> str:
     """Map Google verdict to simplified enum.
 
-    Rules (per spec):
-      - VALID when addressComplete==true AND hasUnconfirmedComponents==false
-        AND validationGranularity >= PREMISE.
-      - NOT_RUN handled upstream.
-      - Otherwise INVALID when addressComplete==false AND
-        (hasUnconfirmedComponents==true OR granularity too coarse/unspecified).
-      - Else UNCONFIRMED.
+    VALID when:
+      addressComplete==true AND hasUnconfirmedComponents==false
+      AND validationGranularity >= PREMISE.
+    INVALID when:
+      addressComplete==false AND (hasUnconfirmedComponents==true OR granularity too coarse/unspecified).
+    Otherwise UNCONFIRMED.
     """
     if not v or not isinstance(v, dict):
         return "UNCONFIRMED"
@@ -161,7 +158,6 @@ def _derive_verdict(v: Optional[Dict[str, Any]]) -> str:
     ):
         return "VALID"
 
-    # Strong invalid signals
     if (not address_complete) and (
         has_unconfirmed or rank <= _granularity_rank("OTHER")
     ):
@@ -203,10 +199,8 @@ def validate_one(
     params = {"key": api_key or ""}
     body = {
         "address": {
-            # Freeform; API will parse. We pass as a single line per spec allowance.
             "addressLines": [address_raw],
         },
-        # Hints and regionCode could be added in future (e.g., from normalized country).
     }
 
     for attempt in range(1, retry.max_attempts + 1):
@@ -314,7 +308,7 @@ def run_validation(
     log_path: Optional[str] = None,
     http_post=_http_post,
 ) -> int:
-    """Main entry: decide which rows to validate, call API as needed, and write CSV."""
+    """Decide which rows to validate, call API as needed, and write CSV."""
     cfg = config_loader.load_config(config_path)
 
     # Load inputs
@@ -428,7 +422,7 @@ def run_validation(
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Conditional Address Validation (Sprint 5)."
+        description="Conditional Address Validation."
     )
     parser.add_argument("--geocode", required=True, help="Path to data/geocode.csv")
     parser.add_argument(
