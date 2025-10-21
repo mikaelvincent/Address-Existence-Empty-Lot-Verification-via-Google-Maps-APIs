@@ -32,7 +32,7 @@ python3 -m pip install -r requirements.txt
 
 ### 3) Run (current pipeline)
 
-**Normalize → Geocode → Street View metadata → Footprints proximity → Conditional Address Validation**
+**Normalize → Geocode → Street View metadata → Footprints proximity → Conditional Address Validation → Decision & URLs**
 
 ```bash
 # Normalize input CSV to data/normalized.csv
@@ -72,6 +72,17 @@ python src/validate_postal.py \
   --output data/validation.csv \
   --config config/config.yml \
   --log data/logs/address_validation_api_log.jsonl
+
+# Decision engine & Maps URLs to data/enhanced.csv (+ summary JSON)
+python src/decide.py \
+  --geocode data/geocode.csv \
+  --svmeta data/streetview_meta.csv \
+  --footprints data/footprints.csv \
+  --validation data/validation.csv \
+  --normalized data/normalized.csv \
+  --output data/enhanced.csv \
+  --config config/config.yml \
+  --summary data/logs/decision_summary.json
 ```
 
 Or via `make`:
@@ -82,9 +93,14 @@ make geocode   IN=data/normalized.csv OUT=data/geocode.csv LOG=data/logs/geocode
 make svmeta    IN=data/geocode.csv    OUT=data/streetview_meta.csv LOG=data/logs/streetview_meta_api_log.jsonl
 make footprints IN=data/geocode.csv FP="data/footprints/*.geojson" OUT=data/footprints.csv LOG=data/logs/footprints_log.jsonl
 make validate  GEOCODE=data/geocode.csv SVMETA=data/streetview_meta.csv FP=data/footprints.csv NORM=data/normalized.csv OUT=data/validation.csv LOG=data/logs/address_validation_api_log.jsonl
+make decide    GEOCODE=data/geocode.csv SVMETA=data/streetview_meta.csv FP=data/footprints.csv VALID=data/validation.csv NORM=data/normalized.csv OUT=data/enhanced.csv QA=data/logs/decision_summary.json
 ```
 
-**Determinism tip:** This module writes no timestamps to CSV. API attempt times are logged in JSONL only.
+**Determinism tip:** Upstream modules write no timestamps to CSV. `enhanced.csv` includes a `run_timestamp_utc`. For reproducible tests, set:
+
+```bash
+export RUN_ANCHOR_TIMESTAMP_UTC="2025-01-01T00:00:00+00:00"
+```
 
 ---
 
@@ -96,4 +112,4 @@ make validate  GEOCODE=data/geocode.csv SVMETA=data/streetview_meta.csv FP=data/
 * ✅ Cache **only** lat/lng (≤ 30 days) and cacheable **Google IDs**.
 * ❌ Do **not** scrape google.com/maps or export content beyond licensed API fields.
 
-> Address Validation calls are **selective** and run **only** on rows flagged by §7.5 triggers to control cost and preserve determinism.
+> The decision engine generates Maps URLs only (no scraping) and follows §7.6 of the spec for labels and reason codes. P.O. Boxes are always labeled `NON_PHYSICAL_ADDRESS` (spec §12).
