@@ -1,5 +1,5 @@
 # Configuration for Address Existence & Empty‑Lot Verification
-# Sprint 1 focuses on bootstrap, compliance guardrails, and ingestion.
+# Initial focus: bootstrap, compliance guardrails, and ingestion.
 
 project:
   name: "address-existence-empty-lot-verification"
@@ -12,8 +12,8 @@ api:
   url_signing_secret_env: "GOOGLE_URL_SIGNING_SECRET"  # optional (recommended by Google for certain calls)
 
 thresholds:
-  stale_years: 7            # for Street View staleness (used in later sprints)
-  footprint_radius_m: 20    # for building-footprint proximity (used in later sprints)
+  stale_years: 7            # for Street View staleness (used in later modules)
+  footprint_radius_m: 20    # for building-footprint proximity (used in later modules)
 
 retry:
   max_attempts: 3
