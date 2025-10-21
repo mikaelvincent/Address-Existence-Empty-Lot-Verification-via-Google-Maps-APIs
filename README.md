@@ -1,63 +1,64 @@
 # Address Existence & Empty‑Lot Verification (Google Maps APIs)
 
-Verify that mailing addresses correspond to real, physical locations and flag potential empty lots—using only **official Google Maps Platform APIs** and policy‑compliant caching.
+Verify that mailing addresses correspond to real, physical locations and flag likely empty lots—using only **official Google Maps Platform APIs** and policy‑compliant caching.
 
-> **APIs used**
-> - Geocoding API (precision + coordinates)
-> - Street View **metadata** endpoint (availability + capture date) — **no image downloads for automation**
-> - Address Validation API (optional; run on ambiguous cases only)
+## What this project does
 
----
+- **Normalize input addresses** (single‑line or multi‑field CSV).
+- **Geocode** each address and capture precision (`location_type`).
+- Attach **Street View metadata** (availability + capture date) — *no image downloads for automation*.
+- Check **building‑footprint proximity** using Microsoft’s Global ML Building Footprints.
+- Run **Address Validation** on ambiguous cases only.
+- Apply a **deterministic decision engine** to label each row and generate **Google Maps URLs** for 1‑click human checks.
+- Produce a **human‑review kit** and a **final run report**.
 
-## Quick Start
+## Features & APIs
 
-### 1) Install
+- **Geocoding API** — coordinates + precision.
+- **Street View metadata** — availability & date (metadata only; no quota/billing for metadata).
+- **Address Validation API** — standardized form & deliverability signals (conditional).
+- **Maps URLs** — safe links for reviewers; no API key required to open.
+
+## Requirements
+
+- Python 3.9+ (recommended)
+- Google Maps Platform API keys (provided via environment variables)
+
+## Install
+
 ```bash
 python3 -m pip install -r requirements.txt
 ```
 
-### 2) Configure
+## Configure
 
-* Edit [`config/config.yml`](config/config.yml) (keeps **names** of environment variables, not secrets).
-
-* **Provide secrets via environment variables** — recommended:
-
-  * `GOOGLE_MAPS_API_KEY`
-  * `GOOGLE_ADDRESS_VALIDATION_API_KEY`
-  * `GOOGLE_URL_SIGNING_SECRET` (optional; recommended for certain signed URL calls)
-
-#### Option A — export in your shell
+Set the required secrets as environment variables (recommended):
 
 ```bash
 export GOOGLE_MAPS_API_KEY="your_key_here"
 export GOOGLE_ADDRESS_VALIDATION_API_KEY="your_key_here"
-# optional
+# optional (for certain signed calls)
 export GOOGLE_URL_SIGNING_SECRET="your_secret_here"
 ```
 
-#### Option B — use a local `.env` file (convenient for dev)
+Or use a local `.env`:
 
-1. Create it from the example:
+```bash
+cp .env.example .env
+# Edit .env, then load for this shell:
+export $(grep -v '^#' .env | xargs)
+```
 
-   ```bash
-   cp .env.example .env
-   # open .env and paste your values
-   ```
-2. Load it for the current shell session:
+Configuration file: [`config/config.yml`](config/config.yml)
+This YAML stores **names of env vars**, thresholds, and concurrency—**not** secrets.
 
-   ```bash
-   # bash/zsh
-   export $(grep -v '^#' .env | xargs)
-   ```
+### Policy notes (summary)
 
-   > If you prefer automation, tools like **direnv** or **python-dotenv** can auto‑load `.env`. No code changes are required because the app already reads from environment variables.
+* Use **only** official Google Maps Platform APIs.
+* Cache **only** latitude/longitude (TTL ≤ **30 days**) and permitted **Google IDs** (e.g., Place IDs, pano IDs).
+* Do **not** scrape google.com/maps or bulk‑export content beyond permitted API responses.
 
-**Policy notes**
-
-* Cache **only** latitude/longitude (TTL ≤ **30 days**) and cacheable **Google IDs** (e.g., Place IDs, pano IDs).
-* Do **not** scrape google.com/maps or bulk export content outside permitted API responses.
-
-### 3) Run (current pipeline)
+## Run the pipeline
 
 **Normalize → Geocode → Street View metadata → Footprints proximity → Conditional Address Validation → Decision & URLs → Human‑review kit → Final consolidation & report**
 
@@ -75,7 +76,7 @@ python src/geocode.py \
   --config config/config.yml \
   --log data/logs/geocode_api_log.jsonl
 
-# Street View metadata to data/streetview_meta.csv (logs to data/logs/)
+# Street View metadata to data/streetview_meta.csv
 python src/streetview_meta.py \
   --geocode data/geocode.csv \
   --output data/streetview_meta.csv \
@@ -90,7 +91,7 @@ python src/footprints.py \
   --config config/config.yml \
   --log data/logs/footprints_log.jsonl
 
-# Conditional Address Validation to data/validation.csv (logs to data/logs/)
+# Conditional Address Validation to data/validation.csv
 python src/validate_postal.py \
   --geocode data/geocode.csv \
   --svmeta data/streetview_meta.csv \
@@ -111,8 +112,7 @@ python src/decide.py \
   --config config/config.yml \
   --summary data/logs/decision_summary.json
 
-# Human‑review kit (Sprint 7)
-# Produces: data/review_queue.csv, data/review_log_template.csv, docs/reviewer_rubric.md, docs/reviewer_rubric.pdf*
+# Human‑review kit
 python src/review_pack.py \
   --enhanced data/enhanced.csv \
   --queue-out data/review_queue.csv \
@@ -121,9 +121,7 @@ python src/review_pack.py \
   --rubric-out-pdf docs/reviewer_rubric.pdf \
   --config config/config.yml
 
-# Final consolidation & run report (Sprint 8)
-# - Merges optional data/review_log_completed.csv
-# - Writes data/final_enhanced.csv, docs/run_report.md/.pdf, data/logs/final_decisions.jsonl
+# Final consolidation & run report
 python src/reporting.py \
   --enhanced data/enhanced.csv \
   --reviews data/review_log_completed.csv \
@@ -147,10 +145,12 @@ make review    IN=data/enhanced.csv QOUT=data/review_queue.csv LTOUT=data/review
 make report    ENH=data/enhanced.csv REV=data/review_log_completed.csv FINAL=data/final_enhanced.csv MD=docs/run_report.md PDF=docs/run_report.pdf JLOG=data/logs/final_decisions.jsonl
 ```
 
-**Determinism tip:** Upstream modules write no timestamps to intermediate CSVs; `enhanced.csv` includes a run timestamp. For reproducible reports, set:
+### Reproducibility
+
+For reproducible timestamps in outputs:
 
 ```bash
 export RUN_ANCHOR_TIMESTAMP_UTC="2025-01-01T00:00:00+00:00"
 ```
 
-**PDF note:** The run report PDF is generated if `fpdf2` is installed (already listed in `requirements.txt`). Otherwise, the Markdown report is always written.
+> The run report PDF is generated if `fpdf2` is installed; Markdown is always written.
