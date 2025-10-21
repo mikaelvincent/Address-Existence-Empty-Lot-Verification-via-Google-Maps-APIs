@@ -1,17 +1,17 @@
-"""Street View metadata integration (Sprint 3)
+"""Street View metadata integration.
 
 - Reads data/geocode.csv (input_id, geocode_status, lat, lng)
-- Calls Google Street View Static API **metadata** endpoint for rows with coordinates
+- Calls Street View Static API **metadata** endpoint for rows with coordinates
 - Parses: sv_metadata_status, sv_image_date, sv_stale_flag
 - Writes:
     * data/streetview_meta.csv
-    * data/logs/streetview_meta_api_log.jsonl (API attempt logs, PII-safe)
+    * data/logs/streetview_meta_api_log.jsonl (API attempt logs, PII‑safe)
 - Deterministic: preserves input order; no timestamps in CSV output
 
-Compliance notes:
+Compliance:
 - This module queries **metadata** only; it does **not** request Street View images.
-- Metadata requests require an API key and are **no-charge**; only image loads are billed.
-- When passing `location=<lat,lng>`, Google automatically searches for a panorama within ~50 m;
+- Metadata requests require an API key and are no‑charge; only image loads are billed.
+- When passing `location=<lat,lng>`, Google searches for a panorama within ~50 m;
   this radius is not configurable on the metadata endpoint.
 """
 
@@ -102,7 +102,7 @@ def _anchor_date() -> dt.date:
 
 
 def _is_stale(status: str, date_str: Optional[str], stale_years: int) -> bool:
-    """Compute staleness per spec:
+    """Compute staleness per policy:
     - True if image date older than `stale_years`
     - OR if date is missing but status == OK
     """
@@ -339,7 +339,7 @@ def run_sv_metadata(
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Attach Street View metadata to geocoded rows (Sprint 3)."
+        description="Attach Street View metadata to geocoded rows."
     )
     parser.add_argument("--geocode", required=True, help="Path to data/geocode.csv")
     parser.add_argument(
