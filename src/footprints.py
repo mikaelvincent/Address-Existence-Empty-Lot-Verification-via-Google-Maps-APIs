@@ -165,61 +165,50 @@ def _stream_centroids_from_geojson(
 ) -> List[Tuple[float, float]]:
     """Stream a large GeoJSON FeatureCollection and return centroids.
 
-    Requires ijson.
+    Tries multiple ijson prefixes to be resilient across backends:
+      - 'features.item'           (common case)
+      - 'item.features.item'      (some backends require 'item' at root)
+      - 'data.features.item'      (rare: wrapped payloads)
+
+    Raises:
+      RuntimeError if no supported structure is detected (so caller can decide to skip/fallback).
     """
     ijson = _maybe_import_ijson()
     if ijson is None:
         raise RuntimeError("ijson not available")
 
-    pts: List[Tuple[float, float]] = []
-    total = 0
-    accepted = 0
+    candidates = ("features.item", "item.features.item", "data.features.item")
+    last_total = 0
 
-    # First attempt: FeatureCollection.features array
-    try:
-        with open(path, "rb") as f:
-            for feat in ijson.items(f, "features.item"):
-                total += 1
-                c = _feature_centroid_latlng(feat)
-                if c:
-                    pts.append(c)
-                    accepted += 1
-                if progress_every and total % progress_every == 0:
-                    print(
-                        f"[footprints]   parsed {total:,} features (accepted {accepted:,}) from {os.path.basename(path)}",
-                        flush=True,
-                    )
-        if total > 0:
-            return pts
-    except Exception:
-        # Will try a secondary pattern; error details not fatal here.
-        pass
-
-    # Second attempt: top-level array of features
-    try:
-        with open(path, "rb") as f:
+    for prefix in candidates:
+        pts: List[Tuple[float, float]] = []
+        total = 0
+        accepted = 0
+        try:
+            with open(path, "rb") as f:
+                for feat in ijson.items(f, prefix):
+                    total += 1
+                    c = _feature_centroid_latlng(feat if isinstance(feat, dict) else {})
+                    if c:
+                        pts.append(c)
+                        accepted += 1
+                    if progress_every and total % progress_every == 0:
+                        print(
+                            f"[footprints]   parsed {total:,} features (accepted {accepted:,}) from {os.path.basename(path)} [prefix='{prefix}']",
+                            flush=True,
+                        )
+        except Exception:
+            # Try next prefix
             total = 0
             accepted = 0
-            for feat in ijson.items(f, "item"):
-                # If the file is a bare array of Feature objects
-                if not isinstance(feat, dict):
-                    continue
-                c = _feature_centroid_latlng(feat)
-                total += 1
-                if c:
-                    pts.append(c)
-                    accepted += 1
-                if progress_every and total % progress_every == 0:
-                    print(
-                        f"[footprints]   parsed {total:,} items (accepted {accepted:,}) from {os.path.basename(path)}",
-                        flush=True,
-                    )
+            pts = []
+
+        # If this prefix yielded any items, return (even if none were polygonal)
         if total > 0:
             return pts
-    except Exception:
-        pass
+        last_total = total
 
-    # If neither pattern worked, let the caller decide (skip or fallback).
+    # If we reached here, none of the prefixes yielded items — signal caller to fallback/skip
     raise RuntimeError("Streaming parse did not detect a supported GeoJSON structure")
 
 
