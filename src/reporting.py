@@ -1,4 +1,3 @@
-# src/reporting.py
 """Consolidation, QA, and final packaging.
 
 Functions:
@@ -292,6 +291,14 @@ def _latin1_sanitize(text: str) -> str:
 
 
 def _write_text_pdf(text: str, out_path: str) -> Tuple[bool, str]:
+    """Write a simple text PDF using fpdf2 if available.
+
+    Rendering hardening for broad viewer compatibility:
+    - Force left alignment (avoid justification quirks in some renderers).
+    - Use w=0 to span to the right margin safely.
+    - Force black text color explicitly.
+    - Prefer modern cursor controls (new_x/new_y); fall back if unavailable.
+    """
     try:
         from fpdf import FPDF  # type: ignore
         try:
@@ -306,24 +313,30 @@ def _write_text_pdf(text: str, out_path: str) -> Tuple[bool, str]:
     pdf.set_auto_page_break(auto=True, margin=15)
     pdf.add_page()
     pdf.set_font("helvetica", size=12)
-
-    usable_w = max(20, pdf.w - pdf.l_margin - pdf.r_margin)
+    # Make text color explicit and conservative
+    try:
+        pdf.set_text_color(0, 0, 0)
+        pdf.set_draw_color(0, 0, 0)
+    except Exception:
+        pass
 
     for line in text.splitlines():
+        # Render headings as plain lines (strip leading '#')
         if line.startswith("#"):
             line = line.lstrip("#").strip()
         sanitized = _latin1_sanitize(line)
+
+        # Build kwargs compatibly across fpdf2 versions
+        common_kwargs = {"align": "L"}  # avoid justification
+        if WrapMode:
+            common_kwargs["wrapmode"] = WrapMode.CHAR
+
         try:
-            if WrapMode:
-                pdf.multi_cell(usable_w, 6, text=sanitized, wrapmode=WrapMode.CHAR)
-            else:
-                pdf.multi_cell(usable_w, 6, text=sanitized)
-        except Exception:
-            sanitized_fallback = sanitized.encode("latin-1", "ignore").decode("latin-1")
-            if WrapMode:
-                pdf.multi_cell(usable_w, 6, text=sanitized_fallback, wrapmode=WrapMode.CHAR)
-            else:
-                pdf.multi_cell(usable_w, 6, text=sanitized_fallback)
+            # Preferred in modern fpdf2: explicit cursor movement after each line
+            pdf.multi_cell(0, 6, txt=sanitized, new_x="LMARGIN", new_y="NEXT", **common_kwargs)  # type: ignore[arg-type]
+        except TypeError:
+            # Older versions: fall back to basic call
+            pdf.multi_cell(0, 6, txt=sanitized, **common_kwargs)
 
     try:
         pdf.output(out_path)
