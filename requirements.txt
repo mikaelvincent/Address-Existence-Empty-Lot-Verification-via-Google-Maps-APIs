@@ -2,3 +2,4 @@ pyyaml>=6.0.1
 pytest>=8.0.0
 requests>=2.31.0
 fpdf2>=2.7.8  # optional; used to export the reviewer rubric as PDF
+ijson>=3.2.3  # optional; used to stream very large GeoJSON without loading it all into RAM
