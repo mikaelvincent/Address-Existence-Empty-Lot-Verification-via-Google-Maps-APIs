@@ -3,7 +3,7 @@
 Input:  data/enhanced.csv
 Outputs:
     * data/review_queue.csv
-    * data/review_log_template.csv  <-- now includes rich context columns
+    * data/review_log_template.csv  <-- includes rich context columns (now with input correctness)
     * docs/reviewer_rubric.md
     * docs/reviewer_rubric.pdf (optional; created if fpdf2 is installed)
 
@@ -13,6 +13,7 @@ Queue criteria:
 Why these columns?
 - Reviewers need a 1‑click Maps URL and compact evidence (precision, footprints,
   Street View status/date/staleness, validation summary) to decide quickly.
+- We now also surface **input correctness** (equivalence and issue codes).
 
 Compliance:
 - Generates documents and CSVs only. No API calls. No scraping.
@@ -38,6 +39,9 @@ TARGET_FLAGS = {"LIKELY_EMPTY_LOT", "NEEDS_HUMAN_REVIEW"}
 REVIEW_QUEUE_COLUMNS = [
     "input_id",
     "final_flag",
+    "input_incorrect_flag",
+    "input_equivalence",
+    "input_issue_codes",
     "input_address_raw",
     "std_address",
     "google_maps_url",
@@ -64,6 +68,9 @@ REVIEW_LOG_COLUMNS = [
     "std_address",
     "google_maps_url",
     "final_flag",
+    "input_incorrect_flag",
+    "input_equivalence",
+    "input_issue_codes",
     "location_type",
     "footprint_present_flag",
     "footprint_within_m",
@@ -155,6 +162,12 @@ This review kit includes only rows where **`final_flag ∈ {{LIKELY_EMPTY_LOT, N
 - `LIKELY_EMPTY_LOT` — The automated signals suggest an empty lot (e.g., non‑rooftop geocode, no nearby footprint, Street View OK/zero‑results).
 - `NEEDS_HUMAN_REVIEW` — Signals are conflicting or insufficient for an automatic decision.
 
+## Input correctness signals (for transparency)
+- `input_incorrect_flag` — whether the *submitted* address string had material issues.
+- `input_equivalence` — relationship between the submitted string and Google's standardized result:
+  - `SAME`, `EQUIVALENT_MINOR`, `CORRECTED_MAJOR`, or `DIFFERENT`.
+- `input_issue_codes` — specific changes (e.g., `COMP_REPLACED_POSTAL_CODE`) and any distance/ID differences.
+
 ## Decisions you can make
 - `CONFIRM_VALID` — A principal structure is clearly present within the parcel / pin area.
 - `CONFIRM_EMPTY_LOT` — Land appears unbuilt (or only a minor shed/parking) consistent with an **empty lot**.
@@ -187,6 +200,7 @@ This review kit includes only rows where **`final_flag ∈ {{LIKELY_EMPTY_LOT, N
 
 **Context columns (do not edit):**
 `input_id`, `input_address_raw`, `std_address`, `google_maps_url`, `final_flag`,
+`input_incorrect_flag`, `input_equivalence`, `input_issue_codes`,
 `location_type`, `footprint_present_flag`, `footprint_within_m`,
 `sv_metadata_status`, `sv_image_date`, `sv_stale_flag`,
 `validation_verdict`, `non_physical_flag`, `reason_codes`, `notes`
