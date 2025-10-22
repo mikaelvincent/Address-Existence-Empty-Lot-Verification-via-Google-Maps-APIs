@@ -159,3 +159,30 @@ export RUN_ANCHOR_TIMESTAMP_UTC="2025-01-01T00:00:00+00:00"
 ```
 
 > The run report PDF is generated if `fpdf2` is installed; Markdown is always written.
+
+## Footprints performance tips
+
+- This step accepts **CSV centroids** (`lat,lng`) or **NDJSON**. Those are fastest.
+- For **polygon GeoJSON**:
+  - The loader now **streams** large files (when `ijson` is installed) and prints progress.
+  - The CLI **auto‑filters** footprint files by state tokens inferred from your input
+    addresses (e.g., files containing `Colorado` for addresses with `, CO`).
+  - If no files match the inferred tokens, it falls back to all files you provided.
+
+**Optional flags:**
+
+```bash
+python src/footprints.py \
+  --geocode data/geocode.csv \
+  --footprints "data/footprints/*.geojson" \
+  --output data/footprints.csv \
+  --config config/config.yml \
+  --stream-threshold-mb 50 \
+  --progress-every 200000
+# Disable auto-filtering or streaming if you need:
+#   --no-auto-filter
+#   --no-prefer-stream
+````
+
+> If you routinely work at national scale, consider pre‑converting the footprints to
+> **centroids** once (CSV) and running proximity checks against that smaller dataset.
