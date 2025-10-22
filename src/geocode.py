@@ -2,7 +2,7 @@
 
 - Reads data/normalized.csv
 - Calls Google Geocoding API with retries/backoff and concurrency
-- Parses: geocode_status, lat, lng, location_type
+- Parses: geocode_status, lat, lng, location_type, place_id
 - Caching: stores ONLY lat/lng with TTL ≤ 30 days (policy‑compliant)
 - Writes:
     * data/geocode.csv
@@ -48,6 +48,7 @@ class GeocodeResult:
     lat: Optional[float]
     lng: Optional[float]
     location_type: str
+    place_id: str
     api_error_codes: List[str]
 
 
@@ -166,13 +167,14 @@ def geocode_address_with_retry(
     retry: config_loader.RetryPolicy,
     logger: JsonlLogger,
     http_get=_http_get,
-) -> Tuple[str, Optional[float], Optional[float], str, List[str]]:
-    """Return (geocode_status, lat, lng, location_type, api_error_codes)."""
+) -> Tuple[str, Optional[float], Optional[float], str, str, List[str]]:
+    """Return (geocode_status, lat, lng, location_type, place_id, api_error_codes)."""
     api_error_codes: List[str] = []
     last_status = "UNKNOWN_ERROR"
     location_type = ""
     lat = None
     lng = None
+    place_id = ""
 
     for attempt in range(1, retry.max_attempts + 1):
         started = dt.datetime.now(dt.timezone.utc).isoformat()
@@ -204,6 +206,7 @@ def geocode_address_with_retry(
                     lat = float(loc.get("lat")) if "lat" in loc else None
                     lng = float(loc.get("lng")) if "lng" in loc else None
                     location_type = str(lt)
+                    place_id = str(first.get("place_id") or "")
                     last_status = "OK"
 
                     # Log attempt
@@ -215,10 +218,11 @@ def geocode_address_with_retry(
                             "address": address,
                             "http_status": http_status,
                             "geocode_status": last_status,
+                            "place_id": place_id,
                             "note": "OK",
                         }
                     )
-                    return last_status, lat, lng, location_type, api_error_codes
+                    return last_status, lat, lng, location_type, place_id, api_error_codes
 
                 elif status in {
                     "ZERO_RESULTS",
@@ -240,7 +244,7 @@ def geocode_address_with_retry(
                         }
                     )
                     if status == "ZERO_RESULTS":
-                        return status, None, None, "", api_error_codes
+                        return status, None, None, "", "", api_error_codes
                     # For other statuses, fall through to backoff unless last attempt
                     last_status = status
                 else:
@@ -292,7 +296,7 @@ def geocode_address_with_retry(
             time.sleep(base + jitter)
 
     # Exhausted retries
-    return last_status, lat, lng, location_type, api_error_codes
+    return last_status, lat, lng, location_type, place_id, api_error_codes
 
 
 # ------------------------------
@@ -329,7 +333,7 @@ def geocode_rows(
         input_id = row["input_id"]
         address = row["input_address_raw"]
 
-        status, lat, lng, location_type, api_codes = geocode_address_with_retry(
+        status, lat, lng, location_type, place_id, api_codes = geocode_address_with_retry(
             input_id=input_id,
             address=address,
             api_key=api_key,
@@ -357,6 +361,7 @@ def geocode_rows(
             lat=lat,
             lng=lng,
             location_type=location_type if status == "OK" else "",
+            place_id=place_id if status == "OK" else "",
             api_error_codes=api_codes,
         )
         with lock:
@@ -413,6 +418,7 @@ def geocode_file(
                 "lat",
                 "lng",
                 "location_type",
+                "place_id",
                 "api_error_codes",
             ],
         )
@@ -426,6 +432,7 @@ def geocode_file(
                     "lat": _format_coord(r.lat),
                     "lng": _format_coord(r.lng),
                     "location_type": r.location_type,
+                    "place_id": r.place_id,
                     "api_error_codes": "|".join(r.api_error_codes),
                 }
             )
