@@ -3,10 +3,13 @@
 
 Inputs (CSV; join key: input_id):
   - data/normalized.csv      (non_physical_flag)
-  - data/geocode.csv         (input_address_raw, geocode_status, lat, lng, location_type, api_error_codes)
+  - data/geocode.csv         (input_address_raw, geocode_status, lat, lng, location_type, place_id, api_error_codes)
   - data/streetview_meta.csv (sv_metadata_status, sv_image_date, sv_stale_flag, api_error_codes)
   - data/footprints.csv      (footprint_within_m, footprint_present_flag)
-  - data/validation.csv      (std_address, validation_ran_flag, validation_verdict, api_error_codes)
+  - data/validation.csv      (std_address, validation_ran_flag, validation_verdict, validation_place_id,
+                              validation_lat, validation_lng,
+                              component_replaced_types, component_spell_corrected_types, unconfirmed_component_types,
+                              api_error_codes)
 
 Outputs:
   - data/enhanced.csv (schema documented in docs/spec; see repository docs)
@@ -18,6 +21,13 @@ Rules:
   - Per spec §12: any persistent API failure in upstream modules (after retries) must:
       * populate `api_error_codes`, and
       * short-circuit to NEEDS_HUMAN_REVIEW with reason `API_FAILURE`.
+
+New (Track A: input correctness):
+  - Compute input↔standardized equivalence using:
+      • Place ID equality (preferred), else
+      • Coordinate proximity (≤ 25 m = same place; 25–200 m = nearby; > 200 m = different).
+  - Emit: input_incorrect_flag, input_equivalence, input_issue_codes.
+  - Do NOT override Track B site assessment (`final_flag`); both axes are reported.
 
 Compliance:
   - Generates only Google Maps **URLs** for human review (no scraping, no API here).
@@ -40,10 +50,11 @@ import csv
 import datetime as dt
 import hashlib
 import json
+import math
 import os
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 
 import config_loader  # type: ignore
 import urls  # type: ignore
@@ -116,6 +127,21 @@ def _compute_run_key(input_csv_path: str, config_path: str) -> str:
     return "rk1|" + hashlib.sha256(payload).hexdigest()
 
 
+def _haversine_m(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
+    """Great-circle distance in meters."""
+    R = 6371008.8  # mean Earth radius (m)
+    phi1 = math.radians(lat1)
+    phi2 = math.radians(lat2)
+    dphi = math.radians(lat2 - lat1)
+    dlmb = math.radians(lon2 - lon1)
+    a = (
+        math.sin(dphi / 2) ** 2
+        + math.cos(phi1) * math.cos(phi2) * math.sin(dlmb / 2) ** 2
+    )
+    c = 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
+    return R * c
+
+
 # Controlled vocabulary ordering for deterministic reason code lists
 _REASON_ORDER = [
     "NO_GEOCODE",
@@ -128,6 +154,9 @@ _REASON_ORDER = [
     "SV_OK",
     "SV_ZERO_RESULTS",
     "SV_STALE",
+    "INPUT_MINOR_CORRECTION",
+    "INPUT_MAJOR_CORRECTION",
+    "INPUT_MISMATCH",
     "API_FAILURE",  # persistent API errors after retries
 ]
 
@@ -152,6 +181,12 @@ class EnhancedRow:
     google_maps_url: str
     final_flag: str  # VALID_LOCATION | INVALID_ADDRESS | LIKELY_EMPTY_LOT | NEEDS_HUMAN_REVIEW | NON_PHYSICAL_ADDRESS
     reason_codes: str  # pipe-delimited
+
+    # New (Track A — input correctness)
+    input_incorrect_flag: str  # "true"/"false"
+    input_equivalence: str     # SAME | EQUIVALENT_MINOR | CORRECTED_MAJOR | DIFFERENT
+    input_issue_codes: str     # pipe-delimited
+
     notes: str
     run_timestamp_utc: str
     api_error_codes: str
@@ -177,6 +212,84 @@ def _split_codes(s: str) -> List[str]:
     return [tok for tok in s.split("|") if tok.strip()]
 
 
+# ------------------------------
+# Input equivalence
+# ------------------------------
+
+_EQ_SAME_M = 25.0
+_EQ_NEAR_M = 200.0
+_MAJOR_HINTS = [
+    "POSTAL", "ZIP",
+    "ROUTE", "THOROUGHFARE", "STREET",
+    "STREET_NUMBER", "SUB_THOROUGHFARE",
+    "PREMISE", "SUB_PREMISE",
+    "LOCALITY", "ADMINISTRATIVE",
+]
+
+
+def _is_major_component(ctype: str) -> bool:
+    c = (ctype or "").upper()
+    return any(h in c for h in _MAJOR_HINTS)
+
+
+def _equivalence_and_issues(
+    geo_place_id: str,
+    geo_lat: Optional[float],
+    geo_lng: Optional[float],
+    val_place_id: str,
+    val_lat: Optional[float],
+    val_lng: Optional[float],
+    replaced_types: List[str],
+    spell_types: List[str],
+    unconf_types: List[str],
+    validation_ran_flag: bool,
+) -> Tuple[str, bool, List[str], Optional[float]]:
+    """Return (equivalence, input_incorrect, issue_codes, distance_m)."""
+    issues: List[str] = []
+    distance_m: Optional[float] = None
+
+    if not validation_ran_flag:
+        return "SAME", False, issues, None
+
+    # Same place via Place ID
+    same_place = bool(geo_place_id and val_place_id and geo_place_id == val_place_id)
+    nearby = False
+
+    # Or via proximity
+    if not same_place and None not in (geo_lat, geo_lng, val_lat, val_lng):
+        distance_m = _haversine_m(geo_lat or 0.0, geo_lng or 0.0, val_lat or 0.0, val_lng or 0.0)
+        same_place = distance_m <= _EQ_SAME_M
+        nearby = distance_m <= _EQ_NEAR_M
+
+    # Component-based issues
+    major_replaced = any(_is_major_component(t) for t in replaced_types)
+    for t in replaced_types:
+        issues.append(f"COMP_REPLACED_{(t or '').upper()}")
+    for t in spell_types:
+        issues.append(f"SPELL_CORRECTED_{(t or '').upper()}")
+    for t in unconf_types:
+        issues.append(f"UNCONFIRMED_{(t or '').upper()}")
+
+    # Equivalence decision
+    if same_place:
+        if major_replaced:
+            return "CORRECTED_MAJOR", True, issues, distance_m
+        if replaced_types or spell_types or unconf_types:
+            return "EQUIVALENT_MINOR", False, issues, distance_m
+        return "SAME", False, issues, distance_m
+
+    # Different places
+    if geo_place_id and val_place_id and geo_place_id != val_place_id:
+        issues.append("DIFFERENT_PLACE_ID")
+    if distance_m is not None:
+        if distance_m > _EQ_NEAR_M:
+            issues.append("DISTANCE_GT_200M")
+        elif distance_m > _EQ_SAME_M:
+            issues.append("DISTANCE_25_200M")
+
+    return "DIFFERENT", True, issues, distance_m
+
+
 def _decide_one(
     geo: Dict[str, str],
     norm: Dict[str, str],
@@ -191,11 +304,18 @@ def _decide_one(
     lat_s = (geo.get("lat") or "").strip()
     lng_s = (geo.get("lng") or "").strip()
     location_type = (geo.get("location_type") or "").strip()
+    geo_place_id = (geo.get("place_id") or "").strip()
     geo_api_errs = _split_codes(geo.get("api_error_codes", ""))
 
     std_address = val.get("std_address", "")
     validation_ran_flag = _to_bool(val.get("validation_ran_flag", "false"))
     validation_verdict = (val.get("validation_verdict") or "NOT_RUN").strip()
+    val_place_id = (val.get("validation_place_id") or "").strip()
+    val_lat_s = (val.get("validation_lat") or "").strip()
+    val_lng_s = (val.get("validation_lng") or "").strip()
+    repl_types = _split_codes(val.get("component_replaced_types", ""))
+    spell_types = _split_codes(val.get("component_spell_corrected_types", ""))
+    unconf_types = _split_codes(val.get("unconfirmed_component_types", ""))
     val_api_errs = _split_codes(val.get("api_error_codes", ""))
 
     sv_metadata_status = (sv.get("sv_metadata_status") or "").strip()
@@ -246,7 +366,25 @@ def _decide_one(
     if sv_image_date:
         notes = f"SV date {sv_image_date}"
 
-    # Decision order
+    # --- Track A: input correctness (equivalence) ---
+    lat_f = _parse_float(lat_s)
+    lng_f = _parse_float(lng_s)
+    val_lat_f = _parse_float(val_lat_s)
+    val_lng_f = _parse_float(val_lng_s)
+
+    input_equivalence, input_incorrect, issue_codes, _dist = _equivalence_and_issues(
+        geo_place_id, lat_f, lng_f, val_place_id, val_lat_f, val_lng_f,
+        repl_types, spell_types, unconf_types, validation_ran_flag
+    )
+
+    if input_equivalence == "EQUIVALENT_MINOR":
+        reasons.add("INPUT_MINOR_CORRECTION")
+    elif input_equivalence == "CORRECTED_MAJOR":
+        reasons.add("INPUT_MAJOR_CORRECTION")
+    elif input_equivalence == "DIFFERENT":
+        reasons.add("INPUT_MISMATCH")
+
+    # Decision order (Track B — site assessment)
     # Edge-case override: Non-physical always labeled NON_PHYSICAL_ADDRESS.
     if non_physical_flag_b:
         final_flag = "NON_PHYSICAL_ADDRESS"
@@ -280,12 +418,13 @@ def _decide_one(
                     # 5) Needs human review (conflicts or anything else)
                     final_flag = "NEEDS_HUMAN_REVIEW"
 
-    # Google Maps URL (prefer coordinates when available)
-    lat_f = _parse_float(lat_s)
-    lng_f = _parse_float(lng_s)
-    fallback_addr = std_address or input_address_raw
+    # Google Maps URL (prefer resolved/standardized coordinates when available)
+    # Fallback order: validation coords -> geocode coords -> std_address/raw string
+    url_lat = val_lat_f if val_lat_f is not None and val_lng_f is not None else lat_f
+    url_lng = val_lng_f if val_lat_f is not None and val_lng_f is not None else lng_f
+    fallback_addr = (std_address or input_address_raw)
     maps_url = urls.build_maps_search_url(
-        address_fallback=fallback_addr, lat=lat_f, lng=lng_f
+        address_fallback=fallback_addr, lat=url_lat, lng=url_lng
     )
 
     # Render booleans and reason codes with deterministic order
@@ -311,6 +450,11 @@ def _decide_one(
         google_maps_url=maps_url,
         final_flag=final_flag,
         reason_codes=reason_codes,
+
+        input_incorrect_flag=_format_bool(input_incorrect),
+        input_equivalence=input_equivalence,
+        input_issue_codes="|".join(issue_codes),
+
         notes=notes,
         run_timestamp_utc=_anchor_timestamp(),
         api_error_codes="|".join(merged_api_errs),
@@ -338,6 +482,12 @@ def _write_enhanced_csv(out_path: str, rows: List[EnhancedRow]) -> None:
         "google_maps_url",
         "final_flag",
         "reason_codes",
+
+        # New (Track A)
+        "input_incorrect_flag",
+        "input_equivalence",
+        "input_issue_codes",
+
         "notes",
         "run_timestamp_utc",
         "api_error_codes",
