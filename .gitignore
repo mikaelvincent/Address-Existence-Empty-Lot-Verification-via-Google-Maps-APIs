@@ -213,3 +213,5 @@ __marimo__/
 .mapfooter
 
 comments.txt
+
+data/footprints/*.geojson
