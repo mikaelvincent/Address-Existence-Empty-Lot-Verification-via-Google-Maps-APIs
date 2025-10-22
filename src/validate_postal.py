@@ -1,7 +1,7 @@
 """Conditional Address Validation.
 
 Inputs (CSV; join key: input_id):
-    * data/geocode.csv          (includes input_address_raw, location_type)
+    * data/geocode.csv          (includes input_address_raw, location_type, place_id)
     * data/streetview_meta.csv  (metadata status/date/stale)
     * data/footprints.csv       (proximity flags)
     * data/normalized.csv       (non_physical_flag)
@@ -17,7 +17,17 @@ API: Google Address Validation — v1:validateAddress
 
 Output:
     * data/validation.csv with columns:
-        input_id, std_address, validation_ran_flag, validation_verdict, api_error_codes
+        input_id,
+        std_address,
+        validation_ran_flag,
+        validation_verdict,
+        validation_place_id,
+        validation_lat,
+        validation_lng,
+        component_replaced_types,
+        component_spell_corrected_types,
+        unconfirmed_component_types,
+        api_error_codes
       (one row per input_id; NOT_RUN when validation was skipped)
 
 Compliance:
@@ -67,6 +77,12 @@ class ValidationResult:
     std_address: str
     validation_ran_flag: bool
     validation_verdict: str  # VALID | UNCONFIRMED | INVALID | NOT_RUN
+    validation_place_id: str
+    validation_lat: str
+    validation_lng: str
+    component_replaced_types: List[str]
+    component_spell_corrected_types: List[str]
+    unconfirmed_component_types: List[str]
     api_error_codes: List[str]
 
 
@@ -91,6 +107,10 @@ def _to_bool(s: str | None) -> bool:
 
 def _format_bool(b: bool) -> str:
     return "true" if b else "false"
+
+
+def _format_coord(value: Optional[float]) -> str:
+    return f"{value:.6f}" if value is not None else ""
 
 
 # ------------------------------
@@ -188,6 +208,63 @@ def _pick_std_address(result_obj: Dict[str, Any]) -> str:
     return ""
 
 
+def _extract_components(result_obj: Dict[str, Any]) -> Tuple[List[str], List[str], List[str]]:
+    """Return (replaced_types, spell_corrected_types, unconfirmed_types)."""
+    addr_obj = (result_obj or {}).get("address") or {}
+    comps = addr_obj.get("addressComponents") or []
+    replaced: List[str] = []
+    spell: List[str] = []
+    unconfirmed: List[str] = []
+
+    for c in comps:
+        ctype = str(c.get("componentType") or c.get("type") or "").upper()
+        if not ctype:
+            continue
+        if bool(c.get("replaced", False)):
+            replaced.append(ctype)
+        if bool(c.get("spellCorrected", False)):
+            spell.append(ctype)
+        conf = str(c.get("confirmationLevel") or "").upper()
+        # Treat anything other than 'CONFIRMED' as unconfirmed
+        if conf and conf != "CONFIRMED":
+            unconfirmed.append(ctype)
+
+    return replaced, spell, unconfirmed
+
+
+def _extract_geocode(result_obj: Dict[str, Any]) -> Tuple[str, Optional[float], Optional[float]]:
+    """Return (place_id, lat, lng) from result.geocode (best effort across schema variants)."""
+    g = (result_obj or {}).get("geocode") or {}
+    place_id = str(g.get("placeId") or g.get("place_id") or "")  # robust to casing
+    lat = None
+    lng = None
+
+    loc = g.get("location") or g.get("latLng") or {}
+    try:
+        # Common variants:
+        lat = float(
+            loc.get("latitude")
+            if "latitude" in loc
+            else loc.get("lat")
+            if "lat" in loc
+            else (loc.get("latLng") or {}).get("latitude")
+        )
+    except Exception:
+        lat = None
+    try:
+        lng = float(
+            loc.get("longitude")
+            if "longitude" in loc
+            else loc.get("lng")
+            if "lng" in loc
+            else (loc.get("latLng") or {}).get("longitude")
+        )
+    except Exception:
+        lng = None
+
+    return place_id, lat, lng
+
+
 def validate_one(
     input_id: str,
     address_raw: str,
@@ -195,8 +272,18 @@ def validate_one(
     retry: config_loader.RetryPolicy,
     logger: JsonlLogger,
     http_post=_http_post,
-) -> Tuple[str, str, List[str]]:
-    """Call Address Validation API; return (std_address, simplified_verdict, api_error_codes).
+) -> Tuple[
+    str,  # std_address
+    str,  # simplified_verdict
+    str,  # validation_place_id
+    Optional[float],  # validation_lat
+    Optional[float],  # validation_lng
+    List[str],  # replaced_types
+    List[str],  # spell_corrected_types
+    List[str],  # unconfirmed_types
+    List[str],  # api_error_codes
+]:
+    """Call Address Validation API; return detailed signals.
 
     Error classification policy (spec §12):
     - Any transport/server/exception failures must NOT become 'INVALID'.
@@ -205,6 +292,12 @@ def validate_one(
     std_address = ""
     simplified = "UNCONFIRMED"
     api_errs: List[str] = []
+    val_place_id = ""
+    val_lat: Optional[float] = None
+    val_lng: Optional[float] = None
+    replaced_types: List[str] = []
+    spell_types: List[str] = []
+    unconfirmed_types: List[str] = []
 
     params = {"key": api_key or ""}
     body = {
@@ -232,6 +325,8 @@ def validate_one(
                 verdict = result.get("verdict", {}) or {}
                 std_address = _pick_std_address(result)
                 simplified = _derive_verdict(verdict)
+                replaced_types, spell_types, unconfirmed_types = _extract_components(result)
+                val_place_id, val_lat, val_lng = _extract_geocode(result)
                 last_status = "OK"
 
                 logger.write(
@@ -242,9 +337,20 @@ def validate_one(
                         "http_status": http_status,
                         "api_status": "OK",
                         "simplified_verdict": simplified,
+                        "validation_place_id": val_place_id,
                     }
                 )
-                return std_address, simplified, api_errs
+                return (
+                    std_address,
+                    simplified,
+                    val_place_id,
+                    val_lat,
+                    val_lng,
+                    replaced_types,
+                    spell_types,
+                    unconfirmed_types,
+                    api_errs,
+                )
 
             # Error responses may include top-level "error" with "status"
             err_status = (payload.get("error", {}) or {}).get("status")
@@ -285,7 +391,17 @@ def validate_one(
             time.sleep(base)
 
     # Exhausted retries — per spec, treat as UNCONFIRMED; errors surfaced via api_error_codes
-    return std_address, "UNCONFIRMED", api_errs
+    return (
+        std_address,
+        "UNCONFIRMED",
+        val_place_id,
+        val_lat,
+        val_lng,
+        replaced_types,
+        spell_types,
+        unconfirmed_types,
+        api_errs,
+    )
 
 
 # ------------------------------
@@ -371,6 +487,12 @@ def run_validation(
                 std_address="",
                 validation_ran_flag=False,
                 validation_verdict="NOT_RUN",
+                validation_place_id="",
+                validation_lat="",
+                validation_lng="",
+                component_replaced_types=[],
+                component_spell_corrected_types=[],
+                unconfirmed_component_types=[],
                 api_error_codes=[],
             )
 
@@ -378,7 +500,17 @@ def run_validation(
     def worker(ix: int, row: Dict[str, str]) -> Tuple[int, ValidationResult]:
         iid = row.get("input_id", "")
         address_raw = row.get("input_address_raw", "")
-        std_addr, simplified, errs = validate_one(
+        (
+            std_addr,
+            simplified,
+            v_place_id,
+            v_lat,
+            v_lng,
+            repl_types,
+            spell_types,
+            unconf_types,
+            errs,
+        ) = validate_one(
             input_id=iid,
             address_raw=address_raw,
             api_key=api_key,
@@ -391,6 +523,12 @@ def run_validation(
             std_address=std_addr,
             validation_ran_flag=True,
             validation_verdict=simplified,
+            validation_place_id=v_place_id,
+            validation_lat=_format_coord(v_lat),
+            validation_lng=_format_coord(v_lng),
+            component_replaced_types=repl_types,
+            component_spell_corrected_types=spell_types,
+            unconfirmed_component_types=unconf_types,
             api_error_codes=errs,
         )
 
@@ -412,6 +550,12 @@ def run_validation(
                 "std_address",
                 "validation_ran_flag",
                 "validation_verdict",
+                "validation_place_id",
+                "validation_lat",
+                "validation_lng",
+                "component_replaced_types",
+                "component_spell_corrected_types",
+                "unconfirmed_component_types",
                 "api_error_codes",
             ],
         )
@@ -424,6 +568,12 @@ def run_validation(
                     std_address="",
                     validation_ran_flag=False,
                     validation_verdict="NOT_RUN",
+                    validation_place_id="",
+                    validation_lat="",
+                    validation_lng="",
+                    component_replaced_types=[],
+                    component_spell_corrected_types=[],
+                    unconfirmed_component_types=[],
                     api_error_codes=[],
                 ),
             )
@@ -433,6 +583,12 @@ def run_validation(
                     "std_address": r.std_address,
                     "validation_ran_flag": _format_bool(r.validation_ran_flag),
                     "validation_verdict": r.validation_verdict,
+                    "validation_place_id": r.validation_place_id,
+                    "validation_lat": r.validation_lat,
+                    "validation_lng": r.validation_lng,
+                    "component_replaced_types": "|".join(r.component_replaced_types),
+                    "component_spell_corrected_types": "|".join(r.component_spell_corrected_types),
+                    "unconfirmed_component_types": "|".join(r.unconfirmed_component_types),
                     "api_error_codes": "|".join(r.api_error_codes),
                 }
             )
