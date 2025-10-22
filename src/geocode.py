@@ -55,71 +55,116 @@ class GeocodeResult:
 # ------------------------------
 # Cache (SQLite) — lat/lng only
 # ------------------------------
+# Concurrency hardening:
+# - Use a module-level lock to serialize cache access (fast, avoids writer collisions).
+# - Enable WAL mode and longer busy timeouts on each connection.
+# - Provide a small retry on 'database is locked' for writes.
+
+_CACHE_LOCK = threading.RLock()
+_CACHE_DB_TIMEOUT_SEC = 30.0  # sqlite3 connect() timeout; wait for locks
+_CACHE_BUSY_TIMEOUT_MS = 15000  # PRAGMA busy_timeout (ms)
+# Note: WAL improves readers-writer concurrency; still only one writer at a time.
+
+
+def _open_conn(db_path: str) -> sqlite3.Connection:
+    conn = sqlite3.connect(
+        db_path,
+        timeout=_CACHE_DB_TIMEOUT_SEC,
+        check_same_thread=False,  # we never share conn objects across threads, but safe
+    )
+    try:
+        # Set busy timeout as a secondary guard (connect(timeout=...) also sets it)
+        conn.execute(f"PRAGMA busy_timeout = {_CACHE_BUSY_TIMEOUT_MS}")
+        # WAL helps readers proceed during writes and reduces full-file locks
+        conn.execute("PRAGMA journal_mode=WAL")
+        # A reasonable durability/performance tradeoff for a cache
+        conn.execute("PRAGMA synchronous=NORMAL")
+    except Exception:
+        # Older SQLite builds or read-only FS may ignore PRAGMAs — that's fine.
+        pass
+    return conn
 
 
 def _ensure_cache_db(db_path: str) -> None:
     Path(os.path.dirname(db_path) or ".").mkdir(parents=True, exist_ok=True)
-    with sqlite3.connect(db_path) as conn:
-        conn.execute(
-            """
-            CREATE TABLE IF NOT EXISTS geocode_cache (
-                input_id TEXT PRIMARY KEY,
-                lat REAL NOT NULL,
-                lng REAL NOT NULL,
-                cached_at_utc TEXT NOT NULL
+    with _CACHE_LOCK:
+        with _open_conn(db_path) as conn:
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS geocode_cache (
+                    input_id TEXT PRIMARY KEY,
+                    lat REAL NOT NULL,
+                    lng REAL NOT NULL,
+                    cached_at_utc TEXT NOT NULL
+                )
+                """
             )
-            """
-        )
-        conn.commit()
+            conn.commit()
 
 
 def cache_set_latlng(db_path: str, input_id: str, lat: float, lng: float) -> None:
     now = dt.datetime.now(dt.timezone.utc).isoformat()
-    with sqlite3.connect(db_path) as conn:
-        conn.execute(
-            """
-            INSERT INTO geocode_cache (input_id, lat, lng, cached_at_utc)
-            VALUES (?, ?, ?, ?)
-            ON CONFLICT(input_id) DO UPDATE SET
-                lat=excluded.lat,
-                lng=excluded.lng,
-                cached_at_utc=excluded.cached_at_utc
-            """,
-            (input_id, lat, lng, now),
-        )
-        conn.commit()
+    # Serialize writes to avoid cross-thread writer collisions on Windows/SQLite.
+    with _CACHE_LOCK:
+        # Small targeted retry for transient lock edges (in addition to busy_timeout)
+        for attempt in range(3):
+            try:
+                with _open_conn(db_path) as conn:
+                    conn.execute(
+                        """
+                        INSERT INTO geocode_cache (input_id, lat, lng, cached_at_utc)
+                        VALUES (?, ?, ?, ?)
+                        ON CONFLICT(input_id) DO UPDATE SET
+                            lat=excluded.lat,
+                            lng=excluded.lng,
+                            cached_at_utc=excluded.cached_at_utc
+                        """,
+                        (input_id, lat, lng, now),
+                    )
+                    conn.commit()
+                return
+            except sqlite3.OperationalError as e:
+                # Robustly handle 'database is locked' without crashing
+                if "locked" in str(e).lower() and attempt < 2:
+                    time.sleep(0.05 * (attempt + 1))
+                    continue
+                raise
 
 
 def cache_get_latlng(
     db_path: str, input_id: str, ttl_days: int
 ) -> Optional[Tuple[float, float]]:
-    with sqlite3.connect(db_path) as conn:
-        cur = conn.execute(
-            "SELECT lat, lng, cached_at_utc FROM geocode_cache WHERE input_id = ?",
-            (input_id,),
-        )
-        row = cur.fetchone()
-        if not row:
-            return None
-        lat, lng, cached_at_utc = row
-        try:
-            cached_at = dt.datetime.fromisoformat(cached_at_utc)
-            age = dt.datetime.now(dt.timezone.utc) - cached_at
-            if age <= dt.timedelta(days=ttl_days):
-                return float(lat), float(lng)
-            else:
-                # TTL expired — delete row
+    # Reads may race with a write; serialize for simplicity and portability.
+    with _CACHE_LOCK:
+        with _open_conn(db_path) as conn:
+            cur = conn.execute(
+                "SELECT lat, lng, cached_at_utc FROM geocode_cache WHERE input_id = ?",
+                (input_id,),
+            )
+            row = cur.fetchone()
+            if not row:
+                return None
+            lat, lng, cached_at_utc = row
+            try:
+                cached_at = dt.datetime.fromisoformat(cached_at_utc)
+                age = dt.datetime.now(dt.timezone.utc) - cached_at
+                if age <= dt.timedelta(days=ttl_days):
+                    return float(lat), float(lng)
+                else:
+                    # TTL expired — delete row
+                    conn.execute(
+                        "DELETE FROM geocode_cache WHERE input_id = ?",
+                        (input_id,),
+                    )
+                    conn.commit()
+                    return None
+            except Exception:
+                # If parsing fails, drop cache row to be safe.
                 conn.execute(
-                    "DELETE FROM geocode_cache WHERE input_id = ?",
-                    (input_id,),
+                    "DELETE FROM geocode_cache WHERE input_id = ?", (input_id,)
                 )
                 conn.commit()
                 return None
-        except Exception:
-            # If parsing fails, drop cache row to be safe.
-            conn.execute("DELETE FROM geocode_cache WHERE input_id = ?", (input_id,))
-            conn.commit()
-            return None
 
 
 # ------------------------------
@@ -222,7 +267,14 @@ def geocode_address_with_retry(
                             "note": "OK",
                         }
                     )
-                    return last_status, lat, lng, location_type, place_id, api_error_codes
+                    return (
+                        last_status,
+                        lat,
+                        lng,
+                        location_type,
+                        place_id,
+                        api_error_codes,
+                    )
 
                 elif status in {
                     "ZERO_RESULTS",
@@ -333,13 +385,15 @@ def geocode_rows(
         input_id = row["input_id"]
         address = row["input_address_raw"]
 
-        status, lat, lng, location_type, place_id, api_codes = geocode_address_with_retry(
-            input_id=input_id,
-            address=address,
-            api_key=api_key,
-            retry=cfg.retry,
-            logger=logger,
-            http_get=http_get,
+        status, lat, lng, location_type, place_id, api_codes = (
+            geocode_address_with_retry(
+                input_id=input_id,
+                address=address,
+                api_key=api_key,
+                retry=cfg.retry,
+                logger=logger,
+                http_get=http_get,
+            )
         )
 
         # Cache ONLY lat/lng when available (policy-compliant)
