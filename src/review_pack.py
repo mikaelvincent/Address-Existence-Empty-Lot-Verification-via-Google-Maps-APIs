@@ -211,6 +211,7 @@ def _write_text_pdf(text: str, out_path: str) -> Tuple[bool, str]:
     - Use w=0 to span to the right margin safely.
     - Force black text color explicitly.
     - Prefer modern cursor controls (new_x/new_y); fall back if unavailable.
+    - Prefer modern 'text=' argument; fall back to legacy 'txt=' if needed.
     """
     try:
         from fpdf import FPDF  # type: ignore
@@ -245,10 +246,17 @@ def _write_text_pdf(text: str, out_path: str) -> Tuple[bool, str]:
         if WrapMode:
             common_kwargs["wrapmode"] = WrapMode.CHAR
 
+        # Prefer modern signature; progressively relax for older fpdf2
         try:
-            pdf.multi_cell(0, 6, txt=sanitized, new_x="LMARGIN", new_y="NEXT", **common_kwargs)  # type: ignore[arg-type]
+            pdf.multi_cell(0, 6, text=sanitized, new_x="LMARGIN", new_y="NEXT", **common_kwargs)  # type: ignore[arg-type]
         except TypeError:
-            pdf.multi_cell(0, 6, txt=sanitized, **common_kwargs)
+            try:
+                pdf.multi_cell(0, 6, text=sanitized, **common_kwargs)
+            except TypeError:
+                try:
+                    pdf.multi_cell(0, 6, txt=sanitized, **common_kwargs)
+                except TypeError:
+                    pdf.multi_cell(0, 6, sanitized)
 
     try:
         pdf.output(out_path)
