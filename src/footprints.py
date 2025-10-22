@@ -165,60 +165,68 @@ def _stream_centroids_from_geojson(
 ) -> List[Tuple[float, float]]:
     """Stream a large GeoJSON FeatureCollection and return centroids.
 
-    Tries robust ijson item paths in this order:
-      1) 'item.features.item'  (most robust across backends)
-      2) 'features.item'       (kept for compatibility)
-      3) 'item'                (top-level array of Features)
+    Implementation detail:
+    - Uses ijson's event API + ObjectBuilder to robustly capture features at any
+      depth that ends with 'features.item' (e.g., 'features.item' or 'item.features.item').
+    - This avoids `ijson.items(..., 'features.item')` false negatives observed
+      with some large Microsoft state files under certain backends.
+
+    Raises:
+      RuntimeError if no features are encountered (to respect on_stream_fail policy).
     """
     ijson = _maybe_import_ijson()
     if ijson is None:
         raise RuntimeError("ijson not available")
 
     pts: List[Tuple[float, float]] = []
-    tried_paths: List[str] = []
-    matched_path: Optional[str] = None
+    total = 0
+    accepted = 0
 
-    def _consume(path_expr: str) -> Tuple[int, int]:
-        nonlocal matched_path
-        total = 0
-        accepted = 0
-        with open(path, "rb") as f:
-            for feat in ijson.items(f, path_expr):
-                total += 1
-                if isinstance(feat, dict):
-                    c = _feature_centroid_latlng(feat)
-                    if c:
-                        pts.append(c)
-                        accepted += 1
-                if progress_every and total % progress_every == 0:
-                    print(
-                        f"[footprints]   parsed {total:,} features (accepted {accepted:,}) from {os.path.basename(path)}",
-                        flush=True,
-                    )
-        if total > 0:
-            matched_path = path_expr
-        return total, accepted
+    from ijson.common import ObjectBuilder  # type: ignore
 
-    # Try robust set of prefixes
-    for prefix in ("item.features.item", "features.item", "item"):
-        try:
-            tried_paths.append(prefix)
-            total, _ = _consume(prefix)
-            if total > 0:
-                if matched_path:
-                    print(
-                        f"[footprints]   streaming matched path: {matched_path}",
-                        flush=True,
-                    )
-                return pts
-        except Exception:
-            # swallow and try next pattern
-            continue
+    with open(path, "rb") as f:
+        builder: Optional[ObjectBuilder] = None
 
-    raise RuntimeError(
-        "Streaming parse did not detect a supported GeoJSON structure. "
-        f"Tried ijson paths: {', '.join(tried_paths)}"
-    )
+        # We capture any prefix that ends with '.features.item' OR is exactly 'features.item'
+        def _is_feature_start(prefix: str, event: str) -> bool:
+            return event == "start_map" and (
+                prefix == "features.item" or prefix.endswith(".features.item")
+            )
+
+        for prefix, event, value in ijson.parse(f):
+            if builder is None:
+                if _is_feature_start(prefix, event):
+                    builder = ObjectBuilder()
+                    builder.event(event, value)
+            else:
+                builder.event(event, value)
+                if event == "end_map":
+                    feat = builder.value
+                    builder = None
+                    total += 1
+                    if isinstance(feat, dict):
+                        c = _feature_centroid_latlng(feat)
+                        if c:
+                            pts.append(c)
+                            accepted += 1
+                    if progress_every and total % progress_every == 0:
+                        print(
+                            f"[footprints]   parsed {total:,} features "
+                            f"(accepted {accepted:,}) from {os.path.basename(path)}",
+                            flush=True,
+                        )
+
+    if total == 0:
+        raise RuntimeError(
+            "Streaming parse did not detect any 'features.item' objects in this GeoJSON."
+        )
+    # Final progress line (helpful when total is not a multiple of progress_every)
+    if progress_every:
+        print(
+            f"[footprints]   parsed {total:,} features (accepted {accepted:,}) from {os.path.basename(path)}",
+            flush=True,
+        )
+    return pts
 
 
 def load_centroids_from_file(
