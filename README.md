@@ -164,25 +164,22 @@ export RUN_ANCHOR_TIMESTAMP_UTC="2025-01-01T00:00:00+00:00"
 
 - This step accepts **CSV centroids** (`lat,lng`) or **NDJSON**. Those are fastest.
 - For **polygon GeoJSON**:
-  - The loader now **streams** large files (when `ijson` is installed) and prints progress.
-  - The CLI **auto‑filters** footprint files by state tokens inferred from your input
-    addresses (e.g., files containing `Colorado` for addresses with `, CO`).
-  - If no files match the inferred tokens, it falls back to all files you provided.
+  - The loader **streams** large files (when `ijson` is installed) and prints progress.
+  - The CLI **auto‑filters** footprint files by *exact* state names inferred from your input
+    addresses (e.g., files named `Colorado.geojson` for addresses with `, CO`).
+  - If no files match the inferred states, it falls back to all files you provided.
 
-**Optional flags:**
+**Helpful flags:**
 
 ```bash
-python src/footprints.py \
-  --geocode data/geocode.csv \
-  --footprints "data/footprints/*.geojson" \
-  --output data/footprints.csv \
-  --config config/config.yml \
-  --stream-threshold-mb 50 \
-  --progress-every 200000
-# Disable auto-filtering or streaming if you need:
-#   --no-auto-filter
-#   --no-prefer-stream
-````
+# Show which files would be loaded
+python src/footprints.py --geocode data/geocode.csv --footprints "data/footprints/*.geojson" --output NUL --config config/config.yml --list-only
+
+# Safe default: skip giant files if streaming fails (avoid OOM)
+python src/footprints.py --geocode data/geocode.csv --footprints "data/footprints/*.geojson" \
+  --output data/footprints.csv --config config/config.yml \
+  --stream-threshold-mb 50 --on-stream-fail skip
+```
 
 > If you routinely work at national scale, consider pre‑converting the footprints to
 > **centroids** once (CSV) and running proximity checks against that smaller dataset.
