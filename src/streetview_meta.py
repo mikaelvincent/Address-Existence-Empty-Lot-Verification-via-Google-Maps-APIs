@@ -27,6 +27,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
+import threading  # <-- thread-safe logging
 
 import requests
 
@@ -51,8 +52,10 @@ def _http_get(url: str, params: Dict[str, Any], timeout: int) -> requests.Respon
 
 
 class JsonlLogger:
+    """Thread-safe JSONL logger (guards writes with a lock)."""
     def __init__(self, path: Optional[str]) -> None:
         self.path = path
+        self._lock = threading.Lock()
         self._ensure_dir()
 
     def _ensure_dir(self) -> None:
@@ -63,8 +66,9 @@ class JsonlLogger:
         if not self.path:
             return
         line = json.dumps(rec, ensure_ascii=False)
-        with open(self.path, "a", encoding="utf-8") as f:
-            f.write(line + "\n")
+        with self._lock:
+            with open(self.path, "a", encoding="utf-8") as f:
+                f.write(line + "\n")
 
 
 def _parse_sv_date(date_str: Optional[str]) -> Optional[dt.date]:
