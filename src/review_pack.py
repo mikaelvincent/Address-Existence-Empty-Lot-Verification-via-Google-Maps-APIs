@@ -3,7 +3,7 @@
 Input:  data/enhanced.csv
 Outputs:
     * data/review_queue.csv
-    * data/review_log_template.csv
+    * data/review_log_template.csv  <-- now includes rich context columns
     * docs/reviewer_rubric.md
     * docs/reviewer_rubric.pdf (optional; created if fpdf2 is installed)
 
@@ -54,6 +54,32 @@ REVIEW_QUEUE_COLUMNS = [
     "notes",
 ]
 
+# Columns we include in the *review log template* so reviewers can work
+# from a single CSV. The first group is read-only context (copied from
+# enhanced.csv / queue), followed by the editable reviewer fields.
+REVIEW_LOG_COLUMNS = [
+    # Context (read-only; do not edit)
+    "input_id",
+    "input_address_raw",
+    "std_address",
+    "google_maps_url",
+    "final_flag",
+    "location_type",
+    "footprint_present_flag",
+    "footprint_within_m",
+    "sv_metadata_status",
+    "sv_image_date",
+    "sv_stale_flag",
+    "validation_verdict",
+    "non_physical_flag",
+    "reason_codes",
+    "notes",
+    # Reviewer-editable fields
+    "review_decision",     # CONFIRM_VALID | CONFIRM_EMPTY_LOT | CONFIRM_INVALID | UNSURE
+    "reviewer_initials",
+    "review_notes",
+]
+
 
 @dataclass(frozen=True)
 class ReviewKitPaths:
@@ -92,21 +118,25 @@ def _write_review_queue(rows: List[Dict[str, str]], out_path: str) -> int:
 
 
 def _write_review_log_template(rows: List[Dict[str, str]], out_path: str) -> int:
-    """Prepopulate one blank review row per queued item."""
+    """Prepopulate one row per queued item with rich context.
+
+    Context columns are copied from the queue/enhanced rows and are intended to be
+    read-only (reviewers should not edit them). Editable fields are:
+      - review_decision (CONFIRM_VALID | CONFIRM_EMPTY_LOT | CONFIRM_INVALID | UNSURE)
+      - reviewer_initials
+      - review_notes
+    """
     _ensure_dir(out_path)
-    headers = ["input_id", "review_decision", "reviewer_initials", "review_notes"]
     with open(out_path, "w", encoding="utf-8", newline="") as f:
-        w = csv.DictWriter(f, fieldnames=headers)
+        w = csv.DictWriter(f, fieldnames=REVIEW_LOG_COLUMNS)
         w.writeheader()
         for r in rows:
-            w.writerow(
-                {
-                    "input_id": r.get("input_id", ""),
-                    "review_decision": "",  # CONFIRM_VALID | CONFIRM_EMPTY_LOT | CONFIRM_INVALID | UNSURE
-                    "reviewer_initials": "",
-                    "review_notes": "",
-                }
-            )
+            rec = {k: r.get(k, "") for k in REVIEW_LOG_COLUMNS}
+            # Ensure editable fields start blank
+            rec["review_decision"] = ""
+            rec["reviewer_initials"] = ""
+            rec["review_notes"] = ""
+            w.writerow(rec)
     return len(rows)
 
 
@@ -154,9 +184,14 @@ This review kit includes only rows where **`final_flag ∈ {{LIKELY_EMPTY_LOT, N
 ---
 
 ## Review log fields
-Fill these in `data/review_log_template.csv`:
 
-- `input_id` — Do not change.
+**Context columns (do not edit):**
+`input_id`, `input_address_raw`, `std_address`, `google_maps_url`, `final_flag`,
+`location_type`, `footprint_present_flag`, `footprint_within_m`,
+`sv_metadata_status`, `sv_image_date`, `sv_stale_flag`,
+`validation_verdict`, `non_physical_flag`, `reason_codes`, `notes`
+
+**You fill these:**
 - `review_decision` — One of: `CONFIRM_VALID`, `CONFIRM_EMPTY_LOT`, `CONFIRM_INVALID`, `UNSURE`.
 - `reviewer_initials` — Your initials.
 - `review_notes` — Optional, short note (e.g., “SV 2015; appears vacant”).
