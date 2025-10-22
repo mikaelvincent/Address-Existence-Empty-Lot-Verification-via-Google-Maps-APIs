@@ -15,6 +15,12 @@ Performance notes:
 - We auto‑filter the provided footprint files by state tokens inferred from the
   `input_address_raw` strings (e.g., ", CO ", ", MA "). If nothing matches, we fall back
   to the original file list. Matching is **exact** against normalized filenames (no substrings).
+
+Robustness notes:
+- ijson returns `decimal.Decimal` for non‑integer numbers by default. We now pass
+  `use_float=True` to ijson streaming calls (documented in ijson 3.1+) so coordinates are
+  Python floats, and we additionally coerce ring coordinates to floats inside the centroid
+  computation. This prevents float/Decimal mixing errors in area/centroid math.
 """
 
 from __future__ import annotations
@@ -93,23 +99,37 @@ def _ring_area_and_centroid_xy(
 ) -> Tuple[float, Tuple[float, float]]:
     """Return (signed area in degrees^2, centroid (x,y)=lon,lat) for an outer ring.
 
-    Numerically-stable shoelace centroid with local-origin translation. If degenerate, returns bbox center.
+    Numerically-stable shoelace centroid with local-origin translation.
+    - Coerces coordinates to Python floats to avoid mixing Decimal/float.
+    - If degenerate, returns bbox center.
     """
     if not ring or len(ring) < 3:
         return 0.0, (float("nan"), float("nan"))
 
-    pts = list(ring)
+    # Coerce to float tuples and ensure we have at least 3 points
+    pts: List[Tuple[float, float]] = []
+    for p in ring:
+        try:
+            x = float(p[0])
+            y = float(p[1])
+            pts.append((x, y))
+        except Exception:
+            # skip malformed coordinate
+            continue
+    if len(pts) < 3:
+        return 0.0, (float("nan"), float("nan"))
+
     if pts[0] != pts[-1]:
         pts.append(pts[0])
 
     x_ref, y_ref = pts[0]
-    A = 0.0
-    Cx = 0.0
-    Cy = 0.0
+    A: float = 0.0
+    Cx: float = 0.0
+    Cy: float = 0.0
     for i in range(len(pts) - 1):
         x0, y0 = pts[i][0] - x_ref, pts[i][1] - y_ref
         x1, y1 = pts[i + 1][0] - x_ref, pts[i + 1][1] - y_ref
-        cross = x0 * y1 - x1 * y0
+        cross = x0 * y1 - x1 * y0  # float
         A += cross
         Cx += (x0 + x1) * cross
         Cy += (y0 + y1) * cross
@@ -166,8 +186,8 @@ def _stream_centroids_from_geojson(
     """Stream a GeoJSON FeatureCollection and return centroids.
 
     Strategy (robust + compatible):
-    1) **Primary**: use `ijson.items(f, 'features.item')` — fast & works for standard
-       FeatureCollections (like our tests/fixtures).
+    1) **Primary**: use `ijson.items(f, 'features.item', use_float=True)` — fast & works
+       for standard FeatureCollections (like our tests/fixtures).
     2) **Fallback**: event stream + ObjectBuilder capturing any prefix that ends with
        '.features.item' (handles nested collections seen in some datasets).
 
@@ -186,7 +206,8 @@ def _stream_centroids_from_geojson(
     # --- Attempt 1: ijson.items (standard top-level 'features') ---
     try:
         with open(path, "rb") as f:
-            for feat in ijson.items(f, "features.item"):
+            # IMPORTANT: force ijson to return Python floats (avoid Decimal)
+            for feat in ijson.items(f, "features.item", use_float=True):  # type: ignore[call-arg]
                 total += 1
                 if isinstance(feat, dict):
                     c = _feature_centroid_latlng(feat)
@@ -227,7 +248,8 @@ def _stream_centroids_from_geojson(
                 prefix == "features.item" or prefix.endswith(".features.item")
             )
 
-        for prefix, event, value in ijson.parse(f):
+        # IMPORTANT: force floats here too
+        for prefix, event, value in ijson.parse(f, use_float=True):  # type: ignore[call-arg]
             if builder is None:
                 if _is_feature_start(prefix, event):
                     builder = ObjectBuilder()
