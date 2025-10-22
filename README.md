@@ -120,7 +120,27 @@ python src/review_pack.py \
   --rubric-out-md docs/reviewer_rubric.md \
   --rubric-out-pdf docs/reviewer_rubric.pdf \
   --config config/config.yml
+```
 
+### What’s in the human‑review kit?
+
+* **`data/review_queue.csv`** — subset of rows where `final_flag ∈ {LIKELY_EMPTY_LOT, NEEDS_HUMAN_REVIEW}` with compact evidence columns and a 1‑click **Google Maps URL** per row.
+
+* **`data/review_log_template.csv`** — **now enriched** with helpful context so reviewers can work from a single CSV:
+
+  **Context columns (read‑only; prefilled):**
+  `input_id`, `input_address_raw`, `std_address`, `google_maps_url`, `final_flag`,
+  `location_type`, `footprint_present_flag`, `footprint_within_m`,
+  `sv_metadata_status`, `sv_image_date`, `sv_stale_flag`,
+  `validation_verdict`, `non_physical_flag`, `reason_codes`, `notes`
+
+  **Reviewer fields (to fill):**
+  `review_decision` (`CONFIRM_VALID`, `CONFIRM_EMPTY_LOT`, `CONFIRM_INVALID`, `UNSURE`),
+  `reviewer_initials`, `review_notes`
+
+* **`docs/reviewer_rubric.md` (+ PDF)** — clear rubric with examples.
+
+```bash
 # Final consolidation & run report
 python src/reporting.py \
   --enhanced data/enhanced.csv \
@@ -130,19 +150,6 @@ python src/reporting.py \
   --report-pdf docs/run_report.pdf \
   --log-jsonl data/logs/final_decisions.jsonl \
   --config config/config.yml
-```
-
-Or via `make`:
-
-```bash
-make normalize IN=data/your_input.csv OUT=data/normalized.csv
-make geocode   IN=data/normalized.csv OUT=data/geocode.csv LOG=data/logs/geocode_api_log.jsonl
-make svmeta    IN=data/geocode.csv    OUT=data/streetview_meta.csv LOG=data/logs/streetview_meta_api_log.jsonl
-make footprints IN=data/geocode.csv FP="data/footprints/*.geojson" OUT=data/footprints.csv LOG=data/logs/footprints_log.jsonl
-make validate  GEOCODE=data/geocode.csv SVMETA=data/streetview_meta.csv FP=data/footprints.csv NORM=data/normalized.csv OUT=data/validation.csv LOG=data/logs/address_validation_api_log.jsonl
-make decide    GEOCODE=data/geocode.csv SVMETA=data/streetview_meta.csv FP=data/footprints.csv VALID=data/validation.csv NORM=data/normalized.csv OUT=data/enhanced.csv QA=data/logs/decision_summary.json
-make review    IN=data/enhanced.csv QOUT=data/review_queue.csv LTOUT=data/review_log_template.csv RMD=docs/reviewer_rubric.md RPDF=docs/reviewer_rubric.pdf
-make report    ENH=data/enhanced.csv REV=data/review_log_completed.csv FINAL=data/final_enhanced.csv MD=docs/run_report.md PDF=docs/run_report.pdf JLOG=data/logs/final_decisions.jsonl
 ```
 
 ### Reproducibility
