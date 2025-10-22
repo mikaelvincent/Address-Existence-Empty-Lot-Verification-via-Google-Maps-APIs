@@ -172,7 +172,8 @@ def _stream_centroids_from_geojson(
        '.features.item' (handles nested collections seen in some datasets).
 
     Raises:
-      RuntimeError if no features are encountered at all.
+      RuntimeError if no features are encountered at all **or** when features are seen
+      but **no polygon centroids** can be extracted (to allow caller to fallback).
     """
     ijson = _maybe_import_ijson()
     if ijson is None:
@@ -198,8 +199,8 @@ def _stream_centroids_from_geojson(
                         f"(accepted {accepted:,}) from {os.path.basename(path)}",
                         flush=True,
                     )
-        # If we saw *any* features using items(), return (even if accepted==0)
-        if total > 0:
+        # If we saw features but **no** centroids, try the event-based parser before returning.
+        if total > 0 and accepted > 0:
             if progress_every:
                 print(
                     f"[footprints]   parsed {total:,} features "
@@ -207,6 +208,7 @@ def _stream_centroids_from_geojson(
                     flush=True,
                 )
             return pts
+        # else: fall through to Attempt 2
     except Exception:
         # Fall through to event-based parser
         pass
@@ -216,6 +218,7 @@ def _stream_centroids_from_geojson(
 
     total = 0
     accepted = 0
+    pts = []
     with open(path, "rb") as f:
         builder: Optional[ObjectBuilder] = None
 
@@ -251,6 +254,12 @@ def _stream_centroids_from_geojson(
         raise RuntimeError(
             "Streaming parse did not detect any 'features.item' objects in this GeoJSON."
         )
+    if accepted == 0:
+        # We saw features but couldn't extract any polygon centroids — let caller fallback.
+        raise RuntimeError(
+            "Streaming parse saw features but extracted no polygon centroids."
+        )
+
     if progress_every:
         print(
             f"[footprints]   parsed {total:,} features (accepted {accepted:,}) from {os.path.basename(path)}",
