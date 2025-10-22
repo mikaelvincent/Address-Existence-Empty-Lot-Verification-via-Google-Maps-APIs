@@ -9,12 +9,12 @@
     * data/footprints.csv (input_id, footprint_within_m, footprint_present_flag)
     * data/logs/footprints_log.jsonl (optional JSONL summary)
 
-Performance notes (new):
+Performance notes:
 - For large .geojson files, we stream features with `ijson` (if installed) to avoid loading
   multi‑GB FeatureCollections into memory. Progress is printed every N features.
-- We try to auto‑filter the provided footprint files by state tokens inferred from the
+- We auto‑filter the provided footprint files by state tokens inferred from the
   `input_address_raw` strings (e.g., ", CO ", ", MA "). If nothing matches, we fall back
-  to the original file list.
+  to the original file list. Matching is **exact** against normalized filenames (no substrings).
 """
 
 from __future__ import annotations
@@ -70,7 +70,7 @@ def haversine_m(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
 
 
 # ------------------------------
-# Geo parsing (GeoJSON / CSV) — now with streaming for big files
+# Geo parsing (GeoJSON / CSV) — streaming for big files
 # ------------------------------
 
 _ijson = None  # lazy import
@@ -165,29 +165,62 @@ def _stream_centroids_from_geojson(
 ) -> List[Tuple[float, float]]:
     """Stream a large GeoJSON FeatureCollection and return centroids.
 
-    Requires ijson; falls back to normal load if ijson is unavailable.
+    Requires ijson.
     """
     ijson = _maybe_import_ijson()
     if ijson is None:
-        # No streaming available; fall back to normal load (handled by caller)
         raise RuntimeError("ijson not available")
 
     pts: List[Tuple[float, float]] = []
     total = 0
     accepted = 0
-    with open(path, "rb") as f:
-        for feat in ijson.items(f, "features.item"):
-            total += 1
-            c = _feature_centroid_latlng(feat)
-            if c:
-                pts.append(c)
-                accepted += 1
-            if progress_every and total % progress_every == 0:
-                print(
-                    f"[footprints]   parsed {total:,} features (accepted {accepted:,}) from {os.path.basename(path)}",
-                    flush=True,
-                )
-    return pts
+
+    # First attempt: FeatureCollection.features array
+    try:
+        with open(path, "rb") as f:
+            for feat in ijson.items(f, "features.item"):
+                total += 1
+                c = _feature_centroid_latlng(feat)
+                if c:
+                    pts.append(c)
+                    accepted += 1
+                if progress_every and total % progress_every == 0:
+                    print(
+                        f"[footprints]   parsed {total:,} features (accepted {accepted:,}) from {os.path.basename(path)}",
+                        flush=True,
+                    )
+        if total > 0:
+            return pts
+    except Exception:
+        # Will try a secondary pattern; error details not fatal here.
+        pass
+
+    # Second attempt: top-level array of features
+    try:
+        with open(path, "rb") as f:
+            total = 0
+            accepted = 0
+            for feat in ijson.items(f, "item"):
+                # If the file is a bare array of Feature objects
+                if not isinstance(feat, dict):
+                    continue
+                c = _feature_centroid_latlng(feat)
+                total += 1
+                if c:
+                    pts.append(c)
+                    accepted += 1
+                if progress_every and total % progress_every == 0:
+                    print(
+                        f"[footprints]   parsed {total:,} items (accepted {accepted:,}) from {os.path.basename(path)}",
+                        flush=True,
+                    )
+        if total > 0:
+            return pts
+    except Exception:
+        pass
+
+    # If neither pattern worked, let the caller decide (skip or fallback).
+    raise RuntimeError("Streaming parse did not detect a supported GeoJSON structure")
 
 
 def load_centroids_from_file(
@@ -195,6 +228,7 @@ def load_centroids_from_file(
     prefer_streaming: bool = True,
     stream_threshold_mb: int = 50,
     progress_every: int = 200_000,
+    on_stream_fail: str = "skip",  # 'skip' or 'fallback'
 ) -> List[Tuple[float, float]]:
     """Load (lat, lng) centroids from a file.
 
@@ -242,26 +276,36 @@ def load_centroids_from_file(
                 return _stream_centroids_from_geojson(
                     path, progress_every=progress_every
                 )
-            except Exception:
-                # If streaming fails for any reason, fall back to full load
+            except Exception as e:
+                action = (
+                    "skipping"
+                    if on_stream_fail == "skip"
+                    else "falling back to in‑memory parse"
+                )
                 print(
-                    "[footprints]   streaming failed, falling back to in‑memory parse.",
+                    f"[footprints]   streaming failed ({e.__class__.__name__}: {e}); {action}.",
                     flush=True,
                 )
+                if on_stream_fail == "skip":
+                    return []  # Safe: skip this file entirely
 
-        # Normal (in‑memory) load for small files or when streaming is unavailable
-        with open(path, "r", encoding="utf-8") as f:
-            obj = json.load(f)
-        if (
-            isinstance(obj, dict)
-            and (obj.get("type") or "").upper() == "FEATURECOLLECTION"
-        ):
-            features = obj.get("features") or []
-            for feat in features:
-                c = _feature_centroid_latlng(feat)
-                if c:
-                    pts.append(c)
-            return pts
+        # Normal (in‑memory) load for small files or when streaming is unavailable or fallback requested
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                obj = json.load(f)
+            if (
+                isinstance(obj, dict)
+                and (obj.get("type") or "").upper() == "FEATURECOLLECTION"
+            ):
+                features = obj.get("features") or []
+                for feat in features:
+                    c = _feature_centroid_latlng(feat)
+                    if c:
+                        pts.append(c)
+                return pts
+        except Exception:
+            # NDJSON fallback: one Feature per line
+            pass
 
     # NDJSON fallback: one Feature per line
     with open(path, "r", encoding="utf-8") as f:
@@ -348,11 +392,13 @@ class ProximityResult:
 
 
 # ------------------------------
-# File discovery & auto-filtering
+# File discovery & exact filtering
 # ------------------------------
 
+# Two-letter US abbr finder (", XX " pattern)
 STATE_ABBR_RE = re.compile(r",\s*([A-Z]{2})(?:\s*[, ]|$)")
-# Light map for common US state names (to match filenames); add DC and territories if needed.
+
+# Abbreviation → canonical filename stem (letters only, no spaces)
 US_STATE_ABBR_TO_NAME = {
     "AL": "Alabama",
     "AK": "Alaska",
@@ -362,7 +408,7 @@ US_STATE_ABBR_TO_NAME = {
     "CO": "Colorado",
     "CT": "Connecticut",
     "DE": "Delaware",
-    "DC": "District",
+    "DC": "DistrictOfColumbia",
     "FL": "Florida",
     "GA": "Georgia",
     "HI": "Hawaii",
@@ -407,6 +453,15 @@ US_STATE_ABBR_TO_NAME = {
     "WY": "Wyoming",
 }
 
+# Accept common filename variations for DC
+REGION_SYNONYMS: Dict[str, Tuple[str, ...]] = {
+    "DistrictOfColumbia": ("DistrictOfColumbia", "DistrictofColumbia", "WashingtonDC"),
+}
+
+
+def _norm_letters(s: str) -> str:
+    return "".join(ch for ch in s.lower() if ch.isalpha())
+
 
 def _collect_footprint_files(patterns: Sequence[str]) -> List[str]:
     files: List[str] = []
@@ -424,11 +479,9 @@ def _collect_footprint_files(patterns: Sequence[str]) -> List[str]:
     return sorted(set(files))
 
 
-def _infer_region_tokens_from_addresses(
-    geocode_rows: List[Dict[str, str]],
-) -> List[str]:
-    """Infer region tokens (state abbr + common filename variants) from input_address_raw."""
-    tokens: List[str] = []
+def _infer_state_abbrs_from_addresses(geocode_rows: List[Dict[str, str]]) -> List[str]:
+    """Infer two-letter US state abbreviations from input_address_raw."""
+    out: List[str] = []
     seen: set[str] = set()
     for r in geocode_rows:
         raw = r.get("input_address_raw") or ""
@@ -436,24 +489,41 @@ def _infer_region_tokens_from_addresses(
         if not m:
             continue
         abbr = m.group(1).upper()
-        if abbr in seen:
-            continue
-        seen.add(abbr)
-        tokens.append(abbr)
-        name = US_STATE_ABBR_TO_NAME.get(abbr)
-        if name:
-            tokens.append(
-                name
-            )  # filenames like "Colorado.geojson" or "NewYork.geojson"
-    return tokens
+        if abbr in US_STATE_ABBR_TO_NAME and abbr not in seen:
+            out.append(abbr)
+            seen.add(abbr)
+    return out
 
 
-def _filter_files_by_tokens(files: List[str], tokens: List[str]) -> List[str]:
-    if not tokens:
-        return files
-    toks = [t.lower() for t in tokens]
-    out = [f for f in files if any(t in os.path.basename(f).lower() for t in toks)]
-    return out or files  # never return empty; fall back to original
+def _filter_files_by_states(
+    files: List[str], abbrs: List[str]
+) -> Tuple[List[str], List[str], List[str]]:
+    """Return (matched_files, recognized_abbrs, ignored_tokens)."""
+    if not abbrs:
+        return files, [], []
+
+    # Build target normalized names (with synonyms)
+    target_norms: set[str] = set()
+    recognized: List[str] = []
+    ignored: List[str] = []
+    for a in abbrs:
+        if a in US_STATE_ABBR_TO_NAME:
+            recognized.append(a)
+            name = US_STATE_ABBR_TO_NAME[a]
+            syns = REGION_SYNONYMS.get(name, (name,))
+            for s in syns:
+                target_norms.add(_norm_letters(s))
+        else:
+            ignored.append(a)
+
+    # Map files by normalized stem
+    matched: List[str] = []
+    for f in files:
+        stem = os.path.splitext(os.path.basename(f))[0]
+        if _norm_letters(stem) in target_norms:
+            matched.append(f)
+
+    return (matched or files), recognized, ignored
 
 
 # ------------------------------
@@ -467,6 +537,7 @@ def build_index(
     prefer_streaming: bool = True,
     stream_threshold_mb: int = 50,
     progress_every: int = 200_000,
+    on_stream_fail: str = "skip",
 ) -> GridIndex:
     idx = GridIndex(cell_deg=cell_deg)
     total = 0
@@ -476,7 +547,13 @@ def build_index(
             prefer_streaming=prefer_streaming,
             stream_threshold_mb=stream_threshold_mb,
             progress_every=progress_every,
+            on_stream_fail=on_stream_fail,
         )
+        if not pts:
+            print(
+                f"[footprints]   no centroids loaded from {p} (skipped or empty).",
+                flush=True,
+            )
         idx.add_many(pts)
         total += len(pts)
     print(
@@ -562,6 +639,8 @@ def run_footprints(
     prefer_streaming: bool = True,
     stream_threshold_mb: int = 50,
     progress_every: int = 200_000,
+    on_stream_fail: str = "skip",  # 'skip' or 'fallback'
+    list_only: bool = False,
 ) -> int:
     """Compute footprint proximity for all geocoded rows.
 
@@ -576,15 +655,21 @@ def run_footprints(
     # Expand files and optionally filter by inferred regions
     files = _collect_footprint_files(list(footprint_paths))
     if auto_filter:
-        tokens = _infer_region_tokens_from_addresses(geocode_rows)
-        filtered = _filter_files_by_tokens(files, tokens)
+        abbrs = _infer_state_abbrs_from_addresses(geocode_rows)
+        filtered, recognized, ignored = _filter_files_by_states(files, abbrs)
         if filtered != files:
-            toks = ", ".join(sorted(set(tokens))) if tokens else "(none)"
-            print(
-                f"[footprints] Auto-filter: {len(filtered)} of {len(files)} files matched inferred regions {{{toks}}}.",
-                flush=True,
-            )
-        files = filtered
+            shown = ", ".join(recognized) if recognized else "(none)"
+            msg = f"[footprints] Auto-filter: {len(filtered)} of {len(files)} files matched inferred states {{{shown}}}."
+            if ignored:
+                msg += f" Ignored tokens: {{{', '.join(sorted(set(ignored)))}}}."
+            print(msg, flush=True)
+            files = filtered
+
+    if list_only:
+        print("[footprints] Matched files to be loaded:")
+        for p in files:
+            print("  -", p)
+        return 0
 
     # Build index
     idx = build_index(
@@ -593,6 +678,7 @@ def run_footprints(
         prefer_streaming=prefer_streaming,
         stream_threshold_mb=stream_threshold_mb,
         progress_every=progress_every,
+        on_stream_fail=on_stream_fail,
     )
 
     # Compute proximity
@@ -660,7 +746,7 @@ def main() -> None:
         default=0.01,
         help="Grid cell size in degrees (default 0.01).",
     )
-    # New optional performance flags
+    # Performance & safety flags
     parser.add_argument(
         "--no-auto-filter",
         dest="auto_filter",
@@ -687,6 +773,17 @@ def main() -> None:
         default=200_000,
         help="Print a progress line every N features when streaming (default 200000).",
     )
+    parser.add_argument(
+        "--on-stream-fail",
+        choices=["skip", "fallback"],
+        default="skip",
+        help="When streaming a large GeoJSON fails: 'skip' (default) or 'fallback' to in‑memory parse.",
+    )
+    parser.add_argument(
+        "--list-only",
+        action="store_true",
+        help="List matched footprint files and exit.",
+    )
     args = parser.parse_args()
 
     count = run_footprints(
@@ -702,8 +799,11 @@ def main() -> None:
         ),
         stream_threshold_mb=args.stream_threshold_mb,
         progress_every=args.progress_every,
+        on_stream_fail=args.on_stream_fail,
+        list_only=args.list_only,
     )
-    print(f"Computed proximity for {count} rows -> {args.output}")
+    if not args.list_only:
+        print(f"Computed proximity for {count} rows -> {args.output}")
 
 
 if __name__ == "__main__":
