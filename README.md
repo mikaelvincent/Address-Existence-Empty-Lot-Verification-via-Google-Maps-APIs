@@ -5,24 +5,33 @@ Verify that mailing addresses correspond to real, physical locations and flag li
 ## What this project does
 
 - **Normalize input addresses** (single‑line or multi‑field CSV).
-- **Geocode** each address and capture precision (`location_type`).
+- **Geocode** each address and capture precision (`location_type`) **and `place_id`**.
 - Attach **Street View metadata** (availability + capture date) — *no image downloads for automation*.
 - Check **building‑footprint proximity** using Microsoft’s Global ML Building Footprints.
-- Run **Address Validation** on ambiguous cases only.
-- Apply a **deterministic decision engine** to label each row and generate **Google Maps URLs** for 1‑click human checks.
-- Produce a **human‑review kit** and a **final run report**.
+- Run **Address Validation** on ambiguous cases only, and capture **standardized form + Place ID + per‑component changes**.
+- Apply a **deterministic decision engine** to:
+  - (Track **A**) **Flag incorrect inputs** via `input_incorrect_flag`, `input_equivalence`, and `input_issue_codes`.
+  - (Track **B**) **Assess the physical site** (`final_flag`: `VALID_LOCATION`, `LIKELY_EMPTY_LOT`, etc.).
+- Produce a **human‑review kit** and a **final run report** (now with input‑correctness summary).
 
-## Features & APIs
+## New fields (Track A — input correctness)
 
-- **Geocoding API** — coordinates + precision.
-- **Street View metadata** — availability & date (metadata only; no quota/billing for metadata).
-- **Address Validation API** — standardized form & deliverability signals (conditional).
-- **Maps URLs** — safe links for reviewers; no API key required to open.
+The enhanced CSV now includes:
 
-## Requirements
+- `input_incorrect_flag` — `true` if the submitted string had a **major correction** or resolves to a **different place**.
+- `input_equivalence` — one of:
+  - `SAME`, `EQUIVALENT_MINOR`, `CORRECTED_MAJOR`, `DIFFERENT`
+- `input_issue_codes` — pipe‑delimited details, e.g.:
+  - `COMP_REPLACED_POSTAL_CODE`, `SPELL_CORRECTED_ROUTE`,
+  - `DIFFERENT_PLACE_ID`, `DISTANCE_25_200M`, `DISTANCE_GT_200M`
 
-- Python 3.9+ (recommended)
-- Google Maps Platform API keys (provided via environment variables)
+Supporting fields (from upstream steps):
+
+- Geocoding: `place_id` (added to `data/geocode.csv`)
+- Address Validation: `validation_place_id`, `validation_lat`, `validation_lng`,
+  `component_replaced_types`, `component_spell_corrected_types`, `unconfirmed_component_types`.
+
+> **Note:** `Place ID` is a Google ID that can be cached (permitted by policy). Latitude/longitude may be cached for **≤ 30 days**.
 
 ## Install
 
@@ -50,7 +59,6 @@ export $(grep -v '^#' .env | xargs)
 ```
 
 Configuration file: [`config/config.yml`](config/config.yml)
-This YAML stores **names of env vars**, thresholds, and concurrency—**not** secrets.
 
 ### Policy notes (summary)
 
@@ -124,21 +132,11 @@ python src/review_pack.py \
 
 ### What’s in the human‑review kit?
 
-* **`data/review_queue.csv`** — subset of rows where `final_flag ∈ {LIKELY_EMPTY_LOT, NEEDS_HUMAN_REVIEW}` with compact evidence columns and a 1‑click **Google Maps URL** per row.
+* **`data/review_queue.csv`** — subset of rows where `final_flag ∈ {LIKELY_EMPTY_LOT, NEEDS_HUMAN_REVIEW}` with compact evidence columns, **input correctness** fields, and a 1‑click **Google Maps URL** per row.
 
-* **`data/review_log_template.csv`** — **now enriched** with helpful context so reviewers can work from a single CSV:
+* **`data/review_log_template.csv`** — **enriched** with helpful context so reviewers can work from a single CSV, including `input_incorrect_flag`, `input_equivalence`, and `input_issue_codes`.
 
-  **Context columns (read‑only; prefilled):**
-  `input_id`, `input_address_raw`, `std_address`, `google_maps_url`, `final_flag`,
-  `location_type`, `footprint_present_flag`, `footprint_within_m`,
-  `sv_metadata_status`, `sv_image_date`, `sv_stale_flag`,
-  `validation_verdict`, `non_physical_flag`, `reason_codes`, `notes`
-
-  **Reviewer fields (to fill):**
-  `review_decision` (`CONFIRM_VALID`, `CONFIRM_EMPTY_LOT`, `CONFIRM_INVALID`, `UNSURE`),
-  `reviewer_initials`, `review_notes`
-
-* **`docs/reviewer_rubric.md` (+ PDF)** — clear rubric with examples.
+* **`docs/reviewer_rubric.{md,pdf}`** — clear rubric with examples.
 
 ```bash
 # Final consolidation & run report
