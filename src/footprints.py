@@ -2,16 +2,19 @@
 
 - Reads data/geocode.csv (requires: input_id, geocode_status, lat, lng)
 - Loads footprint tiles (GeoJSON FeatureCollection, NDJSON Features, or CSV with columns lat,lng)
-- Builds a lightweight grid index of centroid points (pure stdlib)
+- Builds a lightweight grid index of centroid points (pure stdlib; optional streaming parse with ijson)
 - For each geocoded coordinate, computes nearest‑centroid haversine distance (meters)
 - Presence flag is true when the nearest centroid lies within the configured radius
 - Writes:
     * data/footprints.csv (input_id, footprint_within_m, footprint_present_flag)
     * data/logs/footprints_log.jsonl (optional JSONL summary)
 
-Notes:
-- Uses Microsoft Global ML Building Footprints dataset; only centroids are stored locally.
-- Centroid computation is stable for small polygons via a translated origin.
+Performance notes (new):
+- For large .geojson files, we stream features with `ijson` (if installed) to avoid loading
+  multi‑GB FeatureCollections into memory. Progress is printed every N features.
+- We try to auto‑filter the provided footprint files by state tokens inferred from the
+  `input_address_raw` strings (e.g., ", CO ", ", MA "). If nothing matches, we fall back
+  to the original file list.
 """
 
 from __future__ import annotations
@@ -22,6 +25,7 @@ import glob
 import json
 import math
 import os
+import re
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from pathlib import Path
@@ -66,8 +70,22 @@ def haversine_m(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
 
 
 # ------------------------------
-# Geo parsing (GeoJSON / CSV)
+# Geo parsing (GeoJSON / CSV) — now with streaming for big files
 # ------------------------------
+
+_ijson = None  # lazy import
+
+
+def _maybe_import_ijson():
+    global _ijson
+    if _ijson is None:
+        try:
+            import ijson  # type: ignore
+
+            _ijson = ijson
+        except Exception:
+            _ijson = False
+    return _ijson if _ijson is not False else None
 
 
 def _ring_area_and_centroid_xy(
@@ -142,16 +160,53 @@ def _feature_centroid_latlng(feature: Dict) -> Optional[Tuple[float, float]]:
     return (best_xy[1], best_xy[0])  # lat,lng
 
 
-def load_centroids_from_file(path: str) -> List[Tuple[float, float]]:
+def _stream_centroids_from_geojson(
+    path: str, progress_every: int = 200_000
+) -> List[Tuple[float, float]]:
+    """Stream a large GeoJSON FeatureCollection and return centroids.
+
+    Requires ijson; falls back to normal load if ijson is unavailable.
+    """
+    ijson = _maybe_import_ijson()
+    if ijson is None:
+        # No streaming available; fall back to normal load (handled by caller)
+        raise RuntimeError("ijson not available")
+
+    pts: List[Tuple[float, float]] = []
+    total = 0
+    accepted = 0
+    with open(path, "rb") as f:
+        for feat in ijson.items(f, "features.item"):
+            total += 1
+            c = _feature_centroid_latlng(feat)
+            if c:
+                pts.append(c)
+                accepted += 1
+            if progress_every and total % progress_every == 0:
+                print(
+                    f"[footprints]   parsed {total:,} features (accepted {accepted:,}) from {os.path.basename(path)}",
+                    flush=True,
+                )
+    return pts
+
+
+def load_centroids_from_file(
+    path: str,
+    prefer_streaming: bool = True,
+    stream_threshold_mb: int = 50,
+    progress_every: int = 200_000,
+) -> List[Tuple[float, float]]:
     """Load (lat, lng) centroids from a file.
 
     Supported:
-    - GeoJSON FeatureCollection with Polygon/MultiPolygon features
+    - GeoJSON FeatureCollection with Polygon/MultiPolygon features (streamed for large files)
     - NDJSON where each line is a GeoJSON Feature
     - CSV with headers 'lat','lng' (case-insensitive)
     """
     pts: List[Tuple[float, float]] = []
     lower = path.lower()
+
+    # CSV fast path
     if lower.endswith(".csv"):
         with open(path, "r", encoding="utf-8", newline="") as f:
             reader = csv.DictReader(f)
@@ -170,8 +225,31 @@ def load_centroids_from_file(path: str) -> List[Tuple[float, float]]:
                 pts.append((lat, lng))
         return pts
 
-    # Try to parse as full JSON first
-    try:
+    # GeoJSON FeatureCollection — choose streaming for large files if possible
+    is_geojson = lower.endswith(".geojson") or lower.endswith(".json")
+    if is_geojson:
+        size_mb = max(1, os.path.getsize(path) // (1024 * 1024))
+        if (
+            prefer_streaming
+            and size_mb >= stream_threshold_mb
+            and _maybe_import_ijson()
+        ):
+            print(
+                f"[footprints] Streaming large GeoJSON: {path} ({size_mb} MB) ...",
+                flush=True,
+            )
+            try:
+                return _stream_centroids_from_geojson(
+                    path, progress_every=progress_every
+                )
+            except Exception:
+                # If streaming fails for any reason, fall back to full load
+                print(
+                    "[footprints]   streaming failed, falling back to in‑memory parse.",
+                    flush=True,
+                )
+
+        # Normal (in‑memory) load for small files or when streaming is unavailable
         with open(path, "r", encoding="utf-8") as f:
             obj = json.load(f)
         if (
@@ -184,9 +262,6 @@ def load_centroids_from_file(path: str) -> List[Tuple[float, float]]:
                 if c:
                     pts.append(c)
             return pts
-    except json.JSONDecodeError:
-        # Fall back to NDJSON streaming
-        pass
 
     # NDJSON fallback: one Feature per line
     with open(path, "r", encoding="utf-8") as f:
@@ -273,8 +348,64 @@ class ProximityResult:
 
 
 # ------------------------------
-# Core logic
+# File discovery & auto-filtering
 # ------------------------------
+
+STATE_ABBR_RE = re.compile(r",\s*([A-Z]{2})(?:\s*[, ]|$)")
+# Light map for common US state names (to match filenames); add DC and territories if needed.
+US_STATE_ABBR_TO_NAME = {
+    "AL": "Alabama",
+    "AK": "Alaska",
+    "AZ": "Arizona",
+    "AR": "Arkansas",
+    "CA": "California",
+    "CO": "Colorado",
+    "CT": "Connecticut",
+    "DE": "Delaware",
+    "DC": "District",
+    "FL": "Florida",
+    "GA": "Georgia",
+    "HI": "Hawaii",
+    "ID": "Idaho",
+    "IL": "Illinois",
+    "IN": "Indiana",
+    "IA": "Iowa",
+    "KS": "Kansas",
+    "KY": "Kentucky",
+    "LA": "Louisiana",
+    "ME": "Maine",
+    "MD": "Maryland",
+    "MA": "Massachusetts",
+    "MI": "Michigan",
+    "MN": "Minnesota",
+    "MS": "Mississippi",
+    "MO": "Missouri",
+    "MT": "Montana",
+    "NE": "Nebraska",
+    "NV": "Nevada",
+    "NH": "NewHampshire",
+    "NJ": "NewJersey",
+    "NM": "NewMexico",
+    "NY": "NewYork",
+    "NC": "NorthCarolina",
+    "ND": "NorthDakota",
+    "OH": "Ohio",
+    "OK": "Oklahoma",
+    "OR": "Oregon",
+    "PA": "Pennsylvania",
+    "RI": "RhodeIsland",
+    "SC": "SouthCarolina",
+    "SD": "SouthDakota",
+    "TN": "Tennessee",
+    "TX": "Texas",
+    "UT": "Utah",
+    "VT": "Vermont",
+    "VA": "Virginia",
+    "WA": "Washington",
+    "WV": "WestVirginia",
+    "WI": "Wisconsin",
+    "WY": "Wyoming",
+}
 
 
 def _collect_footprint_files(patterns: Sequence[str]) -> List[str]:
@@ -290,18 +421,66 @@ def _collect_footprint_files(patterns: Sequence[str]) -> List[str]:
         raise FileNotFoundError(
             "No footprint files found for provided --footprints arguments."
         )
-    return files
+    return sorted(set(files))
 
 
-def build_index(footprint_paths: Sequence[str], cell_deg: float = 0.01) -> GridIndex:
+def _infer_region_tokens_from_addresses(
+    geocode_rows: List[Dict[str, str]],
+) -> List[str]:
+    """Infer region tokens (state abbr + common filename variants) from input_address_raw."""
+    tokens: List[str] = []
+    seen: set[str] = set()
+    for r in geocode_rows:
+        raw = r.get("input_address_raw") or ""
+        m = STATE_ABBR_RE.search(raw)
+        if not m:
+            continue
+        abbr = m.group(1).upper()
+        if abbr in seen:
+            continue
+        seen.add(abbr)
+        tokens.append(abbr)
+        name = US_STATE_ABBR_TO_NAME.get(abbr)
+        if name:
+            tokens.append(
+                name
+            )  # filenames like "Colorado.geojson" or "NewYork.geojson"
+    return tokens
+
+
+def _filter_files_by_tokens(files: List[str], tokens: List[str]) -> List[str]:
+    if not tokens:
+        return files
+    toks = [t.lower() for t in tokens]
+    out = [f for f in files if any(t in os.path.basename(f).lower() for t in toks)]
+    return out or files  # never return empty; fall back to original
+
+
+# ------------------------------
+# Core logic
+# ------------------------------
+
+
+def build_index(
+    footprint_paths: Sequence[str],
+    cell_deg: float = 0.01,
+    prefer_streaming: bool = True,
+    stream_threshold_mb: int = 50,
+    progress_every: int = 200_000,
+) -> GridIndex:
     idx = GridIndex(cell_deg=cell_deg)
     total = 0
     for p in footprint_paths:
-        pts = load_centroids_from_file(p)
+        pts = load_centroids_from_file(
+            p,
+            prefer_streaming=prefer_streaming,
+            stream_threshold_mb=stream_threshold_mb,
+            progress_every=progress_every,
+        )
         idx.add_many(pts)
         total += len(pts)
     print(
-        f"Loaded {total} footprint centroids from {len(footprint_paths)} file(s).",
+        f"Loaded {total:,} footprint centroids from {len(footprint_paths)} file(s).",
         flush=True,
     )
     return idx
@@ -310,11 +489,7 @@ def build_index(footprint_paths: Sequence[str], cell_deg: float = 0.01) -> GridI
 def nearest_distance_m(
     idx: GridIndex, lat: float, lng: float, radius_m: float
 ) -> Tuple[bool, int]:
-    """Return (present_flag, distance_m_rounded_or_neg1).
-
-    Fast path: scan only nearby cells that cover `radius_m`.
-    Fallback: if no candidates are found (rare edge case), scan entire index.
-    """
+    """Return (present_flag, distance_m_rounded_or_neg1)."""
     best: Optional[float] = None
     saw_any = False
 
@@ -383,6 +558,10 @@ def run_footprints(
     footprint_paths: Sequence[str],
     log_path: Optional[str] = None,
     cell_deg: float = 0.01,
+    auto_filter: bool = True,
+    prefer_streaming: bool = True,
+    stream_threshold_mb: int = 50,
+    progress_every: int = 200_000,
 ) -> int:
     """Compute footprint proximity for all geocoded rows.
 
@@ -394,9 +573,27 @@ def run_footprints(
     with open(geocode_csv_path, "r", encoding="utf-8", newline="") as f:
         geocode_rows = list(csv.DictReader(f))
 
-    # Build index
+    # Expand files and optionally filter by inferred regions
     files = _collect_footprint_files(list(footprint_paths))
-    idx = build_index(files, cell_deg=cell_deg)
+    if auto_filter:
+        tokens = _infer_region_tokens_from_addresses(geocode_rows)
+        filtered = _filter_files_by_tokens(files, tokens)
+        if filtered != files:
+            toks = ", ".join(sorted(set(tokens))) if tokens else "(none)"
+            print(
+                f"[footprints] Auto-filter: {len(filtered)} of {len(files)} files matched inferred regions {{{toks}}}.",
+                flush=True,
+            )
+        files = filtered
+
+    # Build index
+    idx = build_index(
+        files,
+        cell_deg=cell_deg,
+        prefer_streaming=prefer_streaming,
+        stream_threshold_mb=stream_threshold_mb,
+        progress_every=progress_every,
+    )
 
     # Compute proximity
     results = compute_proximity_for_rows(geocode_rows, cfg, idx)
@@ -438,9 +635,7 @@ def run_footprints(
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(
-        description="Building‑footprint proximity."
-    )
+    parser = argparse.ArgumentParser(description="Building‑footprint proximity.")
     parser.add_argument("--geocode", required=True, help="Path to data/geocode.csv")
     parser.add_argument(
         "--footprints",
@@ -465,6 +660,33 @@ def main() -> None:
         default=0.01,
         help="Grid cell size in degrees (default 0.01).",
     )
+    # New optional performance flags
+    parser.add_argument(
+        "--no-auto-filter",
+        dest="auto_filter",
+        action="store_false",
+        help="Disable auto-filtering footprint files by inferred state tokens.",
+    )
+    parser.add_argument(
+        "--no-prefer-stream",
+        dest="prefer_streaming",
+        action="store_false",
+        help="Disable streaming parse for large GeoJSON files.",
+    )
+    parser.add_argument(
+        "--stream-threshold-mb",
+        dest="stream_threshold_mb",
+        type=int,
+        default=50,
+        help="Size in MB above which GeoJSON will be streamed (default 50).",
+    )
+    parser.add_argument(
+        "--progress-every",
+        dest="progress_every",
+        type=int,
+        default=200_000,
+        help="Print a progress line every N features when streaming (default 200000).",
+    )
     args = parser.parse_args()
 
     count = run_footprints(
@@ -474,6 +696,12 @@ def main() -> None:
         footprint_paths=args.footprints,
         log_path=args.log,
         cell_deg=args.celldeg,
+        auto_filter=args.auto_filter if hasattr(args, "auto_filter") else True,
+        prefer_streaming=(
+            args.prefer_streaming if hasattr(args, "prefer_streaming") else True
+        ),
+        stream_threshold_mb=args.stream_threshold_mb,
+        progress_every=args.progress_every,
     )
     print(f"Computed proximity for {count} rows -> {args.output}")
 
