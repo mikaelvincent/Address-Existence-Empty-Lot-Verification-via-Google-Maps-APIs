@@ -163,16 +163,16 @@ def _feature_centroid_latlng(feature: Dict) -> Optional[Tuple[float, float]]:
 def _stream_centroids_from_geojson(
     path: str, progress_every: int = 200_000
 ) -> List[Tuple[float, float]]:
-    """Stream a large GeoJSON FeatureCollection and return centroids.
+    """Stream a GeoJSON FeatureCollection and return centroids.
 
-    Implementation detail:
-    - Uses ijson's event API + ObjectBuilder to robustly capture features at any
-      depth that ends with 'features.item' (e.g., 'features.item' or 'item.features.item').
-    - This avoids `ijson.items(..., 'features.item')` false negatives observed
-      with some large Microsoft state files under certain backends.
+    Strategy (robust + compatible):
+    1) **Primary**: use `ijson.items(f, 'features.item')` — fast & works for standard
+       FeatureCollections (like our tests/fixtures).
+    2) **Fallback**: event stream + ObjectBuilder capturing any prefix that ends with
+       '.features.item' (handles nested collections seen in some datasets).
 
     Raises:
-      RuntimeError if no features are encountered (to respect on_stream_fail policy).
+      RuntimeError if no features are encountered at all.
     """
     ijson = _maybe_import_ijson()
     if ijson is None:
@@ -182,12 +182,43 @@ def _stream_centroids_from_geojson(
     total = 0
     accepted = 0
 
+    # --- Attempt 1: ijson.items (standard top-level 'features') ---
+    try:
+        with open(path, "rb") as f:
+            for feat in ijson.items(f, "features.item"):
+                total += 1
+                if isinstance(feat, dict):
+                    c = _feature_centroid_latlng(feat)
+                    if c:
+                        pts.append(c)
+                        accepted += 1
+                if progress_every and total and total % progress_every == 0:
+                    print(
+                        f"[footprints]   parsed {total:,} features "
+                        f"(accepted {accepted:,}) from {os.path.basename(path)}",
+                        flush=True,
+                    )
+        # If we saw *any* features using items(), return (even if accepted==0)
+        if total > 0:
+            if progress_every:
+                print(
+                    f"[footprints]   parsed {total:,} features "
+                    f"(accepted {accepted:,}) from {os.path.basename(path)}",
+                    flush=True,
+                )
+            return pts
+    except Exception:
+        # Fall through to event-based parser
+        pass
+
+    # --- Attempt 2: event parser + ObjectBuilder (nested '...features.item') ---
     from ijson.common import ObjectBuilder  # type: ignore
 
+    total = 0
+    accepted = 0
     with open(path, "rb") as f:
         builder: Optional[ObjectBuilder] = None
 
-        # We capture any prefix that ends with '.features.item' OR is exactly 'features.item'
         def _is_feature_start(prefix: str, event: str) -> bool:
             return event == "start_map" and (
                 prefix == "features.item" or prefix.endswith(".features.item")
@@ -220,7 +251,6 @@ def _stream_centroids_from_geojson(
         raise RuntimeError(
             "Streaming parse did not detect any 'features.item' objects in this GeoJSON."
         )
-    # Final progress line (helpful when total is not a multiple of progress_every)
     if progress_every:
         print(
             f"[footprints]   parsed {total:,} features (accepted {accepted:,}) from {os.path.basename(path)}",
